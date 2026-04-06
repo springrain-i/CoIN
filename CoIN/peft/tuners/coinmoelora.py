@@ -383,13 +383,15 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
             x = x.to(self.lora_A[self.active_adapter].loraA[0].weight.dtype)
-            self.lora_router = self.lora_router.to(x.device)
-            router = self.lora_router[self.active_adapter](x)
+            lora_x, _ = self._apply_token_mask(x)
+            lora_x = self.lora_dropout[self.active_adapter](lora_x)
+            self.lora_router = self.lora_router.to(lora_x.device)
+            router = self.lora_router[self.active_adapter](lora_x)
             router = torch.softmax(router, dim=-1)
             for i in range(self.expert_num):
                 result += ( # lora process
                     self.lora_B[self.active_adapter].loraB[i](
-                        self.lora_A[self.active_adapter].loraA[i](self.lora_dropout[self.active_adapter](x)),
+                        self.lora_A[self.active_adapter].loraA[i](lora_x),
                     )
                     * self.scaling[self.active_adapter]
                     * router[:,:,i].unsqueeze(-1)

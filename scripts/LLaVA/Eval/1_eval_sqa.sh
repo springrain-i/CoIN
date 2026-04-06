@@ -1,37 +1,40 @@
 #!/bin/bash
 
-gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
-IFS=',' read -ra GPULIST <<< "$gpu_list"
-
-CHUNKS=${#GPULIST[@]}
-
 if [ ! -n "$1" ] ;then
     STAGE='Finetune'
 else
     STAGE=$1
 fi
 
-if [ ! -n "$2" ] ;then
-    MODELPATH='./checkpoints/Instruction/Only_Pretrain_1.5/ScienceQA/llava-1.5-7b-lora'
-else
-    MODELPATH=$2
-fi
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
+IFS=',' read -ra GPULIST <<< "$gpu_list"
 
-RESULT_DIR="./results/CoIN/LLaVA/ScienceQA"
+CHUNKS=${#GPULIST[@]}
+
+MODELPATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/CoIN/ScienceQA_llava_lora_rank_128'
+BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5'
+VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
+
+
+RESULT_DIR="./results/CoIN/LLaVA/ScienceQA_NoMerge_Visual"
+#RESULT_DIR="./results/CoIN/LLaVA/ScienceQA_modified"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_vqa_science \
         --model-path $MODELPATH \
-        --model-base ./checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
-        --question-file ./playground/Instructions_Original/ScienceQA/test.json \
-        --image-folder ./cl_dataset \
+        --model-base $BASE_MODEL_PATH \
+        --question-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/ScienceQA/test.json \
+        --image-folder /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset \
         --answers-file $RESULT_DIR/$STAGE/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
+        --merge-lora False \
+        --lora-mode vision \
         --conv-mode vicuna_v1 &
 done
-
+#lora-mode的三个选项: all, text, visual
 wait
 
 output_file=$RESULT_DIR/$STAGE/merge.jsonl
@@ -45,12 +48,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
 done
 
 python -m ETrain.Eval.LLaVA.CoIN.eval_science_qa \
-    --base-dir ./cl_dataset/ScienceQA \
+    --base-dir /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset/ScienceQA \
     --result-file $output_file \
     --output-file $RESULT_DIR/$STAGE/output.jsonl \
     --output-result $RESULT_DIR/$STAGE/output_result.jsonl \
 
-python -m ETrain.Eval.LLaVA.CoIN.create_prompt \
-    --rule ./ETrain/Eval/LLaVA/CoIN/rule.json \
-    --questions ./playground/Instructions_Original/ScienceQA/test.json \
-    --results $output_file \

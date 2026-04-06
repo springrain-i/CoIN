@@ -91,6 +91,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 labels,
                 images
             )
+        self._apply_lora_token_mask()
         output = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -126,6 +127,26 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             if len(lwf_loss) > 0:
                 output['loss'] += self.LWF_lambda *  torch.stack(lwf_loss, dim=0).sum(0)
         return output
+
+    def _apply_lora_token_mask(self):
+        #print("Applying LoRA token mask...")
+        token_mask = getattr(self, "current_lora_mask", None)
+        lora_mode = getattr(self, "lora_mode", "all")
+        # # 用于看是否成功提取token_mask
+        # if not hasattr(self, "_lora_mask_debugged"):
+        #     if token_mask is None:
+        #         print(f"LoRA mask debug: lora_mode={lora_mode}, token_mask=None")
+        #     else:
+        #         unique_vals, counts = torch.unique(token_mask, return_counts=True)
+        #         stats = {int(k.item()): int(v.item()) for k, v in zip(unique_vals, counts)}
+        #         print(f"LoRA mask debug: lora_mode={lora_mode}, token_mask_stats={stats}, shape={tuple(token_mask.shape)}")
+        #     self._lora_mask_debugged = True
+        # if token_mask is not None and (token_mask == 1).any():
+        #     print("LoRA token_mask contains visual tokens (value=1).")
+        for module in self.model.modules():
+            if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+                module.token_mask = token_mask
+                module.lora_mode = lora_mode
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)

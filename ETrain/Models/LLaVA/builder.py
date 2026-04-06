@@ -24,7 +24,7 @@ from ETrain.utils.LLaVA.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_S
 
 sys.path.append('/home/chencheng/Code/Slim_Train/')
 
-def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", **kwargs):
+def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, merge_lora = True,device_map="auto", device="cuda", **kwargs):
     kwargs = {"device_map": device_map, **kwargs}
 
     if device != "cuda":
@@ -78,11 +78,14 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             if 'MOE' in model_name:
                 from CoIN.peft import PeftModel, TaskType, get_peft_model, CoINMOELoraConfig, WEIGHTS_NAME, set_peft_model_state_dict
             else:
-                from peft import PeftModel
+                from CoIN.peft import PeftModel
             print('Loading LoRA weights...')
             model = PeftModel.from_pretrained(model, model_path)
-            print('Merging LoRA weights...')
-            model = model.merge_and_unload()
+            if merge_lora:
+                print('Merging LoRA weights...')
+                model = model.merge_and_unload()
+            else:
+                print('Skipping merging LoRA weights...')
             print('Model is loaded...')
         elif model_base is not None:
             # this may be mm projector only
@@ -117,8 +120,12 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             model = AutoModelForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, **kwargs)
             print(f"Loading LoRA weights from {model_path}")
             model = PeftModel.from_pretrained(model, model_path)
-            print(f"Merging weights")
-            model = model.merge_and_unload()
+
+            if merge_lora:
+                print("Merging weights")
+                model = model.merge_and_unload()
+            else:
+                print("Skipping merging weights")
             print('Convert to FP16...')
             model.to(torch.float16)
         else:

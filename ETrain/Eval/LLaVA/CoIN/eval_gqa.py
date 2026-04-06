@@ -123,7 +123,7 @@ def loadFile(name):
 
 # Load questions
 print("Loading questions...")
-questions = loadFile(os.path.join('./cl_dataset/GQA',args.questions.format(tier = args.tier)))
+questions = loadFile(os.path.join('/data4/wxl/MoBLoRA-backup/CoIN/cl_dataset/GQA',args.questions.format(tier = args.tier)))
 
 # # Load choices
 # print("Loading choices...")

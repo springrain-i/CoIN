@@ -26,13 +26,39 @@ def get_chunk(lst, n, k):
     chunks = split_list(lst, n)
     return chunks[k]
 
-
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1", "y"):
+        return True
+    if v.lower() in ("no", "false", "f", "0", "n"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+    
 def eval_model(args):
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        model_path, args.model_base, model_name,
+        merge_lora=args.merge_lora
+    )
+    model.lora_mode = args.lora_mode
+    if hasattr(model, "base_model"):
+        model.base_model.lora_mode = args.lora_mode
+        if hasattr(model.base_model, "model"):
+            model.base_model.model.lora_mode = args.lora_mode
+    lora_total = 0
+    lora_active = 0
+    for module in model.modules():
+        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+            lora_total += 1
+            active = getattr(module, "active_adapter", None)
+            if active is not None and active in getattr(module, "lora_A", {}):
+                if getattr(module, "r", {}).get(active, 0) > 0:
+                    lora_active += 1
+    print(f"LoRA module check: total={lora_total}, active_with_r>0={lora_active}")
 
     with open(os.path.expanduser(args.question_file), "r") as f:
         questions = json.load(f)
@@ -69,7 +95,7 @@ def eval_model(args):
 
         with torch.inference_mode():
             output_ids = model.generate(
-                input_ids,
+                input_ids=input_ids,
                 images=image_tensor.unsqueeze(0).half().cuda(),
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
@@ -99,6 +125,29 @@ def eval_model(args):
         ans_file.flush()
     ans_file.close()
 
+    lora_stats = None
+    candidates = [
+        model,
+        getattr(model, "base_model", None),
+        getattr(model, "model", None),
+        getattr(getattr(model, "base_model", None), "model", None),
+    ]
+    for candidate in candidates:
+        if candidate is not None and hasattr(candidate, "_lora_token_stats"):
+            lora_stats = getattr(candidate, "_lora_token_stats")
+            break
+
+    if lora_stats is not None:
+        nonpad = max(1, int(lora_stats.get("nonpad", 0)))
+        vision = int(lora_stats.get("vision", 0))
+        text = int(lora_stats.get("text", 0))
+        vision_pct = vision * 100.0 / nonpad
+        text_pct = text * 100.0 / nonpad
+        print(
+            f"LoRA token stats (dataset): text={text} ({text_pct:.2f}%), "
+            f"vision={vision} ({vision_pct:.2f}%), nonpad={nonpad}"
+        )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
@@ -112,7 +161,14 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    
+    parser.add_argument("--merge-lora", type=str2bool, default=True)
+    parser.add_argument(
+        "--lora-mode",
+        type=str,
+        default="all",
+        choices=["all", "text", "vision"],
+    )  # 三个选项: all, text, vision
+    args = parser.parse_args()
     args = parser.parse_args()
 
     eval_model(args)

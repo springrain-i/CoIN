@@ -671,6 +671,112 @@ class LoraLayer:
         self.in_features = in_features
         self.out_features = out_features
         self.kwargs = kwargs
+        self.token_mask = None
+        self.lora_mode = "all"
+
+    def _get_effective_token_mask(self, x: torch.Tensor):
+        token_mask = self.token_mask
+        if token_mask is None:
+            return None
+
+        lora_mode = getattr(self, "lora_mode", "all")
+
+        if token_mask.dtype == torch.bool:
+            mask = token_mask
+        else:
+            if lora_mode == "text":
+                mask = token_mask == 2
+            elif lora_mode == "vision":
+                mask = token_mask == 1
+            else:
+                mask = token_mask > 0
+
+        if x.dim() == 3 and mask.dim() == 2:
+            mask = mask.unsqueeze(-1)
+        elif x.dim() == 2 and mask.dim() == 1:
+            if mask.numel() == x.shape[0]:
+                mask = mask.reshape(-1, 1)
+            else:
+                mask = mask.unsqueeze(-1)
+        elif x.dim() == 2 and mask.dim() == 2:
+            if mask.numel() == x.shape[0]:
+                mask = mask.reshape(-1, 1)
+            elif mask.shape[0] == x.shape[0] and mask.shape[1] != 1:
+                mask = mask[:, :1]
+
+        if mask.dtype != x.dtype:
+            mask = mask.to(dtype=x.dtype)
+
+
+        if mask.dim() == 3:
+            mask_view = mask[0, :, 0]
+        elif mask.dim() == 2:
+            mask_view = mask[0]
+        else:
+            mask_view = mask
+
+        # total = max(1, mask_view.numel())
+        # ones = int((mask_view > 0).sum().item())
+        # zeros = total - ones
+        # ones_pct = ones * 100.0 / total
+        # zeros_pct = zeros * 100.0 / total
+
+        # print(
+        #     f"LoRA token_mask state: mode={lora_mode}, token_mask_shape={tuple(token_mask.shape)}, "
+        #     f"token_mask_dtype={token_mask.dtype}, x_shape={tuple(x.shape)}"
+        # )
+        # print(
+        #     f"LoRA token_mask values: total={total}, ones={ones} ({ones_pct:.2f}%), "
+        #     f"zeros={zeros} ({zeros_pct:.2f}%)"
+        # )
+
+
+        return mask
+
+    def _apply_token_mask(self, lora_x: torch.Tensor):
+        token_mask = self._get_effective_token_mask(lora_x)
+        if token_mask is None:
+            return lora_x, None
+        if token_mask.dim() == 2 and lora_x.dim() == 3:
+            if token_mask.shape[0] != lora_x.shape[0]:
+                raise ValueError(
+                    f"token_mask shape {tuple(token_mask.shape)} does not match lora_x shape {tuple(lora_x.shape)}"
+                )
+            if token_mask.shape[1] != lora_x.shape[1]:
+                if lora_x.shape[1] == 1:
+                    token_mask = token_mask[:, -1:]
+                else:
+                    raise ValueError(
+                        f"token_mask shape {tuple(token_mask.shape)} does not match lora_x shape {tuple(lora_x.shape)}"
+                    )
+            token_mask = token_mask.unsqueeze(-1)
+        elif token_mask.dim() == 2 and lora_x.dim() == 2:
+            if token_mask.numel() != lora_x.shape[0]:
+                raise ValueError(
+                    f"token_mask numel {token_mask.numel()} does not match lora_x shape {tuple(lora_x.shape)}"
+                )
+            token_mask = token_mask.reshape(-1, 1)
+        elif token_mask.dim() == 3 and lora_x.dim() == 3:
+            if token_mask.shape[0] != lora_x.shape[0]:
+                raise ValueError(
+                    f"token_mask shape {tuple(token_mask.shape)} does not match lora_x shape {tuple(lora_x.shape)}"
+                )
+            if token_mask.shape[1] != lora_x.shape[1]:
+                if lora_x.shape[1] == 1:
+                    token_mask = token_mask[:, -1:, :]
+                else:
+                    raise ValueError(
+                        f"token_mask shape {tuple(token_mask.shape)} does not match lora_x shape {tuple(lora_x.shape)}"
+                    )
+        else:
+            raise ValueError(
+                f"Unsupported token_mask dim {token_mask.dim()} for lora_x dim {lora_x.dim()}"
+            )
+
+        if token_mask.dtype != lora_x.dtype:
+            token_mask = token_mask.to(dtype=lora_x.dtype)
+
+        return lora_x * token_mask, token_mask
 
     def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights):
         self.r[adapter_name] = r
@@ -817,10 +923,15 @@ class Linear(nn.Linear, LoraLayer):
             result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-
+            lora_x, token_mask = self._apply_token_mask(x)
+            lora_x = self.lora_dropout[self.active_adapter](lora_x)
+            # if token_mask is not None:
+            #     if not hasattr(self, "_mask_printed"):
+            #         print(f"LoRA mask used in Linear: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, mask_sum={float(token_mask.sum().item())}, mask_shape={tuple(token_mask.shape)}")
+            #         self._mask_printed = True
             result += (
                 self.lora_B[self.active_adapter](
-                    self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                    self.lora_A[self.active_adapter](lora_x)
                 )
                 * self.scaling[self.active_adapter]
             )
@@ -892,7 +1003,17 @@ class Embedding(nn.Embedding, LoraLayer):
                     self.scale_grad_by_freq,
                     self.sparse,
                 )
-                result += (after_A @ self.lora_embedding_B[self.active_adapter].T) * self.scaling[self.active_adapter]
+                lora_x = after_A
+                lora_x, token_mask = self._apply_token_mask(lora_x)
+                if token_mask is not None:
+                    if not hasattr(self, "_mask_printed"):
+                        print(
+                            f"LoRA mask used in Embedding: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, "
+                            f"mask_shape={tuple(token_mask.shape)}, lora_x_shape={tuple(lora_x.shape)}"
+                        )
+                        self._mask_printed = True
+                lora_out = (lora_x @ self.lora_embedding_B[self.active_adapter].T) * self.scaling[self.active_adapter]
+                result += lora_out
             return result
         else:
             return nn.Embedding.forward(self, x)
@@ -1005,10 +1126,18 @@ class Conv2d(nn.Conv2d, LoraLayer):
             )
 
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-
+            lora_x, token_mask = self._apply_token_mask(x)
+            lora_x = self.lora_dropout[self.active_adapter](lora_x)
+            if token_mask is not None:
+                if not hasattr(self, "_mask_printed"):
+                    print(
+                        f"LoRA mask used in Conv2d: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, "
+                        f"mask_shape={tuple(token_mask.shape)}, lora_x_shape={tuple(lora_x.shape)}"
+                    )
+                    self._mask_printed = True
             result += (
                 self.lora_B[self.active_adapter](
-                    self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                    self.lora_A[self.active_adapter](lora_x)
                 )
                 * self.scaling[self.active_adapter]
             )
@@ -1071,16 +1200,28 @@ if is_bnb_available():
 
                     if x.dtype != torch.float32:
                         x = x.float()
+                    lora_x, token_mask = self._apply_token_mask(x)
+                    lora_x = self.lora_dropout[self.active_adapter](lora_x)
+                    if token_mask is not None:
+                        if not hasattr(self, "_mask_printed"):
+                            print(f"LoRA mask used in Linear8bitLt: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, mask_sum={float(token_mask.sum().item())}, mask_shape={tuple(token_mask.shape)}")
+                            self._mask_printed = True
                     output = (
                         self.lora_B[self.active_adapter](
-                            self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                            self.lora_A[self.active_adapter](lora_x)
                         ).to(expected_dtype)
                         * self.scaling[self.active_adapter]
                     )
                 else:
+                    lora_x, token_mask = self._apply_token_mask(x)
+                    lora_x = self.lora_dropout[self.active_adapter](lora_x)
+                    # if token_mask is not None:
+                    #     if not hasattr(self, "_mask_printed"):
+                    #         print(f"LoRA mask used in Linear8bitLt: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, mask_sum={float(token_mask.sum().item())}, mask_shape={tuple(token_mask.shape)}")
+                    #         self._mask_printed = True
                     output = (
                         self.lora_B[self.active_adapter](
-                            self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                            self.lora_A[self.active_adapter](lora_x)
                         )
                         * self.scaling[self.active_adapter]
                     )
@@ -1129,16 +1270,28 @@ if is_bnb_available():
                     if not torch.is_autocast_enabled():
                         expected_dtype = result.dtype
                         x = x.to(self.lora_A[self.active_adapter].weight.dtype)
+                        lora_x, token_mask = self._apply_token_mask(x)
+                        lora_x = self.lora_dropout[self.active_adapter](lora_x)
+                        if token_mask is not None:
+                            if not hasattr(self, "_mask_printed"):
+                                print(f"LoRA mask used in Linear4bit: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, mask_sum={float(token_mask.sum().item())}, mask_shape={tuple(token_mask.shape)}")
+                                self._mask_printed = True
                         output = (
                             self.lora_B[self.active_adapter](
-                                self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                                self.lora_A[self.active_adapter](lora_x)
                             ).to(expected_dtype)
                             * self.scaling[self.active_adapter]
                         )
                     else:
+                        lora_x, token_mask = self._apply_token_mask(x)
+                        lora_x = self.lora_dropout[self.active_adapter](lora_x)
+                        # if token_mask is not None:
+                        #     if not hasattr(self, "_mask_printed"):
+                        #         print(f"LoRA mask used in Linear4bit: mode={getattr(self, 'lora_mode', 'all')}, active={self.active_adapter}, mask_sum={float(token_mask.sum().item())}, mask_shape={tuple(token_mask.shape)}")
+                        #         self._mask_printed = True
                         output = (
                             self.lora_B[self.active_adapter](
-                                self.lora_A[self.active_adapter](self.lora_dropout[self.active_adapter](x))
+                                self.lora_A[self.active_adapter](lora_x)
                             )
                             * self.scaling[self.active_adapter]
                         )

@@ -15,6 +15,16 @@ from PIL import Image
 import math
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1", "y"):
+        return True
+    if v.lower() in ("no", "false", "f", "0", "n"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
@@ -31,7 +41,25 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        model_path, args.model_base, model_name,
+        merge_lora=args.merge_lora
+        )
+    model.lora_mode = args.lora_mode
+    if hasattr(model, "base_model"):
+        model.base_model.lora_mode = args.lora_mode
+        if hasattr(model.base_model, "model"):
+            model.base_model.model.lora_mode = args.lora_mode
+    lora_total = 0
+    lora_active = 0
+    for module in model.modules():
+        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+            lora_total += 1
+            active = getattr(module, "active_adapter", None)
+            if active is not None and active in getattr(module, "lora_A", {}):
+                if getattr(module, "r", {}).get(active, 0) > 0:
+                    lora_active += 1
+    print(f"LoRA module check: total={lora_total}, active_with_r>0={lora_active}")
 
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -74,7 +102,7 @@ def eval_model(args):
 
         with torch.inference_mode():
             output_ids = model.generate(
-                input_ids,
+                input_ids=input_ids,
                 images=images,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
@@ -100,7 +128,7 @@ def eval_model(args):
 
             with torch.inference_mode():
                 output_ids = model.generate(
-                    input_ids,
+                    input_ids=input_ids,
                     images=images,
                     do_sample=True if args.temperature > 0 else False,
                     temperature=args.temperature,
@@ -129,6 +157,29 @@ def eval_model(args):
         ans_file.flush()
     ans_file.close()
 
+    lora_stats = None
+    candidates = [
+        model,
+        getattr(model, "base_model", None),
+        getattr(model, "model", None),
+        getattr(getattr(model, "base_model", None), "model", None),
+    ]
+    for candidate in candidates:
+        if candidate is not None and hasattr(candidate, "_lora_token_stats"):
+            lora_stats = getattr(candidate, "_lora_token_stats")
+            break
+
+    if lora_stats is not None:
+        nonpad = max(1, int(lora_stats.get("nonpad", 0)))
+        vision = int(lora_stats.get("vision", 0))
+        text = int(lora_stats.get("text", 0))
+        vision_pct = vision * 100.0 / nonpad
+        text_pct = text * 100.0 / nonpad
+        print(
+            f"LoRA token stats (dataset): text={text} ({text_pct:.2f}%), "
+            f"vision={vision} ({vision_pct:.2f}%), nonpad={nonpad}"
+        )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
@@ -142,6 +193,13 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
+    parser.add_argument("--merge-lora", type=str2bool, default=True)
+    parser.add_argument(
+        "--lora-mode",
+        type=str,
+        default="all",
+        choices=["all", "text", "vision"],
+    )  # 三个选项: all, text, vision
     args = parser.parse_args()
 
     eval_model(args)

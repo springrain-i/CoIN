@@ -109,6 +109,24 @@ class LlavaMetaForCausalLM(ABC):
                     device=attention_mask.device
                 )), dim=1)
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+            self.current_lora_mask = attention_mask.to(dtype=torch.long) * 2
+            if not hasattr(self, "_lora_token_stats"):
+                self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
+            mask = self.current_lora_mask
+            # Skip counting for generation steps (seq_len=1) to avoid including new tokens.
+            if input_ids.shape[1] != 1:
+                self._lora_token_stats["text"] += int((mask == 2).sum().item())
+                self._lora_token_stats["vision"] += int((mask == 1).sum().item())
+                self._lora_token_stats["pad"] += int((mask == 0).sum().item())
+                self._lora_token_stats["nonpad"] += int((mask > 0).sum().item())
+                self._lora_token_stats["batches"] += 1
+            # if not hasattr(self, "_lora_mask_debugged_early"):
+            #     unique_vals, counts = torch.unique(self.current_lora_mask, return_counts=True)
+            #     stats = {int(k.item()): int(v.item()) for k, v in zip(unique_vals, counts)}
+            #     print(f"LLaVA lora_mask stats (early): {stats}, shape={tuple(self.current_lora_mask.shape)}")
+            #     self._lora_mask_debugged_early = True
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
         if type(images) is list or images.ndim == 5:
@@ -146,6 +164,7 @@ class LlavaMetaForCausalLM(ABC):
 
         new_input_embeds = []
         new_labels = []
+        new_token_masks = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
@@ -155,6 +174,12 @@ class LlavaMetaForCausalLM(ABC):
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
+                new_token_masks.append(torch.full(
+                    (cur_input_embeds.shape[0],),
+                    2,
+                    device=cur_input_embeds.device,
+                    dtype=torch.long,
+                ))
                 cur_image_idx += 1
                 continue
 
@@ -170,21 +195,36 @@ class LlavaMetaForCausalLM(ABC):
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
+            cur_new_token_mask = []
 
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
+                cur_new_token_mask.append(torch.full(
+                    (cur_input_embeds_no_im[i].shape[0],),
+                    2,
+                    device=cur_input_embeds_no_im[i].device,
+                    dtype=torch.long,
+                ))
                 if i < num_images:
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    cur_new_token_mask.append(torch.full(
+                        (cur_image_features.shape[0],),
+                        1,
+                        device=cur_image_features.device,
+                        dtype=torch.long,
+                    ))
 
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
+            cur_new_token_mask = torch.cat(cur_new_token_mask)
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+            new_token_masks.append(cur_new_token_mask)
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
@@ -200,6 +240,7 @@ class LlavaMetaForCausalLM(ABC):
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
+        new_token_mask_padded = torch.zeros((batch_size, max_len), dtype=torch.long, device=new_labels[0].device)
 
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
             cur_len = cur_new_embed.shape[0]
@@ -212,6 +253,7 @@ class LlavaMetaForCausalLM(ABC):
                     new_labels_padded[i, -cur_len:] = cur_new_labels
                     attention_mask[i, -cur_len:] = True
                     position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+                    new_token_mask_padded[i, -cur_len:] = new_token_masks[i]
             else:
                 new_input_embeds_padded.append(torch.cat((
                     cur_new_embed,
@@ -221,6 +263,7 @@ class LlavaMetaForCausalLM(ABC):
                     new_labels_padded[i, :cur_len] = cur_new_labels
                     attention_mask[i, :cur_len] = True
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+                    new_token_mask_padded[i, :cur_len] = new_token_masks[i]
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
@@ -236,6 +279,25 @@ class LlavaMetaForCausalLM(ABC):
 
         if _position_ids is None:
             position_ids = None
+
+        self.current_lora_mask = new_token_mask_padded
+        if not hasattr(self, "_lora_token_stats"):
+            self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
+        mask = self.current_lora_mask
+        self._lora_token_stats["text"] += int((mask == 2).sum().item())
+        self._lora_token_stats["vision"] += int((mask == 1).sum().item())
+        self._lora_token_stats["pad"] += int((mask == 0).sum().item())
+        self._lora_token_stats["nonpad"] += int((mask > 0).sum().item())
+        self._lora_token_stats["batches"] += 1
+        # if not hasattr(self, "_lora_mask_debugged"):
+        #     unique_vals, counts = torch.unique(self.current_lora_mask, return_counts=True)
+        #     stats = {int(k.item()): int(v.item()) for k, v in zip(unique_vals, counts)}
+        #     print(f"LLaVA lora_mask stats: {stats}, shape={tuple(self.current_lora_mask.shape)}")
+        #     self._lora_mask_debugged = True
+        
+        # unique_vals, counts = torch.unique(self.current_lora_mask, return_counts=True)
+        # stats = {int(k.item()): int(v.item()) for k, v in zip(unique_vals, counts)}
+        # print(f"LLaVA lora_mask stats: {stats}, shape={tuple(self.current_lora_mask.shape)}")
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 

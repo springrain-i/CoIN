@@ -1,9 +1,5 @@
 #!/bin/bash
 
-gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
-IFS=',' read -ra GPULIST <<< "$gpu_list"
-
-CHUNKS=${#GPULIST[@]}
 
 if [ ! -n "$1" ] ;then
     STAGE='Finetune'
@@ -11,27 +7,33 @@ else
     STAGE=$1
 fi
 
-if [ ! -n "$2" ] ;then
-    MODELPATH='./checkpoints/Instruction/Only_Pretrain_1.5/GQA/llava-1.5-7b-lora'
-else
-    MODELPATH=$2
-fi
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
+IFS=',' read -ra GPULIST <<< "$gpu_list"
 
-RESULT_DIR="./results/CoIN/LLaVA/GQA"
+CHUNKS=${#GPULIST[@]}
+
+MODELPATH='/data4/home/sqx/CoIN/checkpoints/LLaVA/CoIN/GQA_llava_MOE_lora'
+BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5'
+VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
+
+RESULT_DIR="./results/CoIN/LLaVA/GQA_MOE_only_vision"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_gqa \
         --model-path $MODELPATH \
-        --model-base ./checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
-        --question-file ./playground/Instructions_Original/GQA/test.json \
-        --image-folder ./cl_dataset \
+        --model-base $BASE_MODEL_PATH \
+        --question-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/GQA/test.json \
+        --image-folder /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset \
         --answers-file $RESULT_DIR/$STAGE/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
+        --merge-lora False \
+        --lora-mode vision \
         --conv-mode vicuna_v1 &
 done
-
+# 三个选项: all, text, vision
 wait
 
 output_file=$RESULT_DIR/$STAGE/merge.jsonl
@@ -48,7 +50,3 @@ python -m ETrain.Eval.LLaVA.CoIN.convert_gqa_for_eval --src $output_file --dst $
 
 python -m ETrain.Eval.LLaVA.CoIN.eval_gqa --tier testdev_balanced --path $RESULT_DIR/$STAGE --output-dir $RESULT_DIR/$STAGE 
 
-python -m ETrain.Eval.LLaVA.CoIN.create_prompt \
-    --rule ./ETrain/Eval/LLaVA/CoIN/rule.json \
-    --questions ./playground/Instructions_Original/GQA/test.json \
-    --results $output_file \
