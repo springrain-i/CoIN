@@ -14,6 +14,7 @@ deepspeed --include localhost:0,1,2,3,4,5,6 --master_port 29600 ETrain/Train/LLa
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --expert_num 8 \
     --model_name_or_path /data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
+    --previous_task_model_path ./checkpoints/LLaVA/CoIN/ScienceQA_llava_MOE_lora \
     --version $PROMPT_VERSION \
     --data_path /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/TextVQA/train.json \
     --image_folder /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset \
@@ -43,6 +44,3 @@ deepspeed --include localhost:0,1,2,3,4,5,6 --master_port 29600 ETrain/Train/LLa
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to none
-
-    # 删除了
-    #--previous_task_model_path ./checkpoints/LLaVA/CoIN/ScienceQA_llava_MOE_lora \

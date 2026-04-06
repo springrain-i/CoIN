@@ -27,6 +27,16 @@ def get_chunk(lst, n, k):
     return chunks[k]
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1", "y"):
+        return True
+    if v.lower() in ("no", "false", "f", "0", "n"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
 # Custom dataset class
 class CustomDataset(Dataset):
     def __init__(self, questions, image_folder, tokenizer, image_processor, model_config):
@@ -74,7 +84,15 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        model_path, args.model_base, model_name,
+        merge_lora=args.merge_lora
+    )
+    model.lora_mode = args.lora_mode
+    if hasattr(model, "base_model"):
+        model.base_model.lora_mode = args.lora_mode
+        if hasattr(model.base_model, "model"):
+            model.base_model.model.lora_mode = args.lora_mode
 
     with open(os.path.expanduser(args.question_file), "r") as f:
         questions = json.load(f)
@@ -137,6 +155,13 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--merge-lora", type=str2bool, default=True)
+    parser.add_argument(
+        "--lora-mode",
+        type=str,
+        default="all",
+        choices=["all", "text", "vision"],
+    )
     args = parser.parse_args()
 
     eval_model(args)

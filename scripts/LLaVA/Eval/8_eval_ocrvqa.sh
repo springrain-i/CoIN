@@ -17,6 +17,16 @@ else
     MODELPATH=$2
 fi
 
+if [ ! -n "$3" ] ;then
+    LORA_MODE='all'
+else
+    LORA_MODE=$3
+fi
+
+if [ "$LORA_MODE" = "visual" ]; then
+    LORA_MODE='vision'
+fi
+
 RESULT_DIR="./results/CoIN/LLaVA/OCRVQA"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
@@ -29,6 +39,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
+        --merge-lora False \
+        --lora-mode $LORA_MODE \
         --conv-mode vicuna_v1 &
 done
 
