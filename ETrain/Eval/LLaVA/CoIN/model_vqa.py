@@ -169,6 +169,5 @@ if __name__ == "__main__":
         choices=["all", "text", "vision"],
     )  # 三个选项: all, text, vision
     args = parser.parse_args()
-    args = parser.parse_args()
 
     eval_model(args)

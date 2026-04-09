@@ -57,6 +57,17 @@ CKPT_PATHS=(
   "./checkpoints/LLaVA/CoIN/OCRVQA_llava_MOE_lora"
 )
 
+SINGLE_CKPT_PATHS=(
+  "./checkpoints/LLaVA/CoIN_single/ScienceQA_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/TextVQA_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/ImageNet_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/GQA_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/VizWiz_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/Grounding_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/VQAv2_llava_MOE_lora"
+  "./checkpoints/LLaVA/CoIN_single/OCRVQA_llava_MOE_lora"
+)
+
 if [[ ! -f "$OUT_CSV" ]]; then
   echo "regime,mode,train_task,eval_task,accuracy,result_stage_dir" > "$OUT_CSV"
 fi
@@ -68,7 +79,12 @@ run_eval_once() {
 
   local eval_script=${EVAL_SCRIPTS[$((eval_task-1))]}
   local result_dir=${RESULT_DIRS[$((eval_task-1))]}
-  local model_path=${CKPT_PATHS[$((train_task-1))]}
+  local model_path
+  if [[ "$REGIME" == "single" ]]; then
+    model_path=${SINGLE_CKPT_PATHS[$((train_task-1))]}
+  else
+    model_path=${CKPT_PATHS[$((train_task-1))]}
+  fi
   local stage="${STAGE_PREFIX}_${REGIME}_m${mode}_train${train_task}_eval${eval_task}"
 
   echo "[Eval] mode=${mode}, train=T${train_task}, eval=T${eval_task}"
