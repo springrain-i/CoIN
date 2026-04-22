@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
 # Run independent single-task training for CoIN tasks 1..8.
 # It reuses each Train_MOE task script but removes previous_task_model_path
 # so every task starts from base model instead of continual checkpoint.
@@ -11,14 +14,14 @@ set -euo pipefail
 #   DRY_RUN=1  # only print transformed script paths
 
 TASK_SCRIPTS=(
-  "scripts/LLaVA/Train_MOE/1_Science.sh"
-  "scripts/LLaVA/Train_MOE/2_TextVQA.sh"
-  "scripts/LLaVA/Train_MOE/3_ImageNet.sh"
-  "scripts/LLaVA/Train_MOE/4_GQA.sh"
-  "scripts/LLaVA/Train_MOE/5_VizWiz.sh"
-  "scripts/LLaVA/Train_MOE/6_Grounding.sh"
-  "scripts/LLaVA/Train_MOE/7_vqav2.sh"
-  "scripts/LLaVA/Train_MOE/8_OCRVQA.sh"
+  "${SCRIPT_DIR}/1_Science.sh"
+  "${SCRIPT_DIR}/2_TextVQA.sh"
+  "${SCRIPT_DIR}/3_ImageNet.sh"
+  "${SCRIPT_DIR}/4_GQA.sh"
+  "${SCRIPT_DIR}/5_VizWiz.sh"
+  "${SCRIPT_DIR}/6_Grounding.sh"
+  "${SCRIPT_DIR}/7_vqav2.sh"
+  "${SCRIPT_DIR}/8_OCRVQA.sh"
 )
 
 START_TASK=${1:-1}
@@ -31,15 +34,17 @@ if [[ "$START_TASK" -lt 1 || "$END_TASK" -gt 8 || "$START_TASK" -gt "$END_TASK" 
 fi
 
 echo "[CoIN] Run single-task training from T${START_TASK} to T${END_TASK}"
+cd "${REPO_ROOT}"
+
+# Isolated single-task outputs should not overlap continual outputs.
+export COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_single}"
 
 for i in $(seq "$START_TASK" "$END_TASK"); do
   src="${TASK_SCRIPTS[$((i-1))]}"
   tmp_script=$(mktemp)
 
-  # Remove continual dependency and redirect outputs to CoIN_single.
+  # Remove continual dependency so every task starts from base model.
   sed '/previous_task_model_path/d' "$src" \
-    | sed 's#\./checkpoints/LLaVA/CoIN/#./checkpoints/LLaVA/CoIN_single/#g' \
-    | sed 's#/data4/home/sqx/CoIN/checkpoints/LLaVA/CoIN/#/data4/home/sqx/CoIN/checkpoints/LLaVA/CoIN_single/#g' \
     > "$tmp_script"
 
   chmod +x "$tmp_script"

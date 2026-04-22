@@ -53,14 +53,14 @@ done
 # 三个选项: all, text, vision
 wait
 
-output_file=$RESULT_DIR//$STAGE/merge.jsonl
+output_file=$RESULT_DIR/$STAGE/merge.jsonl
 
 # Clear out the output file if it exists.
 > "$output_file"
 
 # Loop through the indices and concatenate each file.
 for IDX in $(seq 0 $((CHUNKS-1))); do
-    cat $RESULT_DIR//$STAGE/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+    cat $RESULT_DIR/$STAGE/${CHUNKS}_${IDX}.jsonl >> "$output_file"
 done
 
 python -m ETrain.Eval.LLaVA.CoIN.eval_ImagetNet \

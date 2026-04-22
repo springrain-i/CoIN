@@ -1,3 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
 ################## VICUNA ##################
 PROMPT_VERSION=v1
 MODEL_VERSION="vicuna-7b-v1.5"
@@ -9,16 +12,28 @@ MODEL_VERSION="vicuna-7b-v1.5"
 # MODEL_VERSION="Llama-2-7b-chat-hf"
 ################## LLaMA-2 ##################
 
-deepspeed --include localhost:0,1,2,3,4,5,6,7 --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/coin_paths.sh"
+
+DATA_PATH="${COIN_INSTR_ROOT}/OCRVQA/train.json"
+PREVIOUS_TASK_MODEL_PATH="${COIN_OUTPUT_ROOT}/VQAv2_llava_MOE_lora"
+OUTPUT_DIR="${COIN_OUTPUT_ROOT}/OCRVQA_llava_MOE_lora"
+
+require_path "${COIN_BASE_MODEL}" "base model"
+require_path "${COIN_VISION_TOWER}" "vision tower"
+require_path "${DATA_PATH}" "OCRVQA train json"
+require_path "${PREVIOUS_TASK_MODEL_PATH}" "previous task checkpoint"
+
+deepspeed --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
     --deepspeed ./scripts/zero3_offload.json \
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --expert_num 8 \
-    --model_name_or_path ./checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
-    --previous_task_model_path ./checkpoints/LLaVA/CoIN/VQAv2_llava_MOE_lora \
+    --model_name_or_path "${COIN_BASE_MODEL}" \
+    --previous_task_model_path "${PREVIOUS_TASK_MODEL_PATH}" \
     --version $PROMPT_VERSION \
-    --data_path ./playground/Instructions_Original/OCRVQA/train.json \
-    --image_folder ./cl_dataset \
-    --vision_tower ./checkpoints/LLaVA/clip-vit-large-patch14-336 \
+    --data_path "${DATA_PATH}" \
+    --image_folder "${COIN_IMAGE_ROOT}" \
+    --vision_tower "${COIN_VISION_TOWER}" \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -26,7 +41,7 @@ deepspeed --include localhost:0,1,2,3,4,5,6,7 --master_port 29600 ETrain/Train/L
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/LLaVA/CoIN/OCRVQA_llava_MOE_lora \
+    --output_dir "${OUTPUT_DIR}" \
     --num_train_epochs 1 \
     --per_device_train_batch_size 10 \
     --per_device_eval_batch_size 16 \
