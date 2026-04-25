@@ -78,6 +78,16 @@ fi
 echo "[CoIN] Run continual training sequence from T${START_TASK} to T${END_TASK}"
 cd "${REPO_ROOT}"
 
+# Log directory
+LOG_ROOT="${REPO_ROOT}/logs/LLaVA/CoIN"
+mkdir -p "${LOG_ROOT}"
+
+# Timestamp for this run
+TIMESTAMP=$(date "+%Y%m%d_%H%M%S")
+MAIN_LOG="${LOG_ROOT}/continual_${TIMESTAMP}.log"
+
+echo "[CoIN] Main log: ${MAIN_LOG}"
+
 if [[ "$ENABLE_EVAL" == "1" ]]; then
   mkdir -p "${METRIC_DIR}"
   if [[ ! -f "$ONLINE_OUT_CSV" ]]; then
@@ -143,7 +153,11 @@ validate_modes
 
 for i in $(seq "$START_TASK" "$END_TASK"); do
   script="${TASK_SCRIPTS[$((i-1))]}"
-  echo "[CoIN] >>> Training task T${i} via ${script}"
+  task_name="${TASK_NAMES[$((i-1))]}"
+  task_log="${LOG_ROOT}/${task_name}_${TIMESTAMP}.log"
+  echo "[CoIN] >>> Training task T${i} (${task_name}) via ${script}"
+  echo "[CoIN] Task log: ${task_log}"
+
   if [[ "$DRY_RUN" == "1" ]]; then
     if [[ "$ENABLE_EVAL" == "1" ]]; then
       for mode in $MODES; do
@@ -154,8 +168,10 @@ for i in $(seq "$START_TASK" "$END_TASK"); do
     fi
     continue
   fi
-  bash "$script"
-  echo "[CoIN] <<< Finished T${i}"
+
+  bash "$script" 2>&1 | tee "$task_log"
+  echo "[CoIN] <<< Finished T${i} (${task_name})"
+  echo "[CoIN] Log saved to: ${task_log}"
 
   if [[ "$ENABLE_EVAL" == "1" ]]; then
     for mode in $MODES; do
@@ -180,3 +196,4 @@ if [[ "$ENABLE_EVAL" == "1" ]]; then
 fi
 
 echo "[CoIN] Continual training sequence complete."
+echo "[CoIN] All task logs saved to: ${LOG_ROOT}/"

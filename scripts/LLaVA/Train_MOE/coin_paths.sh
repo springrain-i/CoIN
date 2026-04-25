@@ -4,16 +4,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COIN_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Shared asset root from coin_assets_note.md
-COIN_ASSET_ROOT="${COIN_ASSET_ROOT:-/data0/sqx/coin_assets}"
+resolve_first_existing_path() {
+  local candidate
+  for candidate in "$@"; do
+    if [[ -e "$candidate" ]]; then
+      echo "$candidate"
+      return
+    fi
+  done
+  # Keep behavior predictable even when nothing exists yet.
+  echo "$1"
+}
+
+DEFAULT_BASE_MODEL="$(resolve_first_existing_path \
+  /data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5)"
+
+DEFAULT_VISION_TOWER="$(resolve_first_existing_path \
+  /data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336)"
+
+DEFAULT_PRETRAIN_PROJECTOR="$(resolve_first_existing_path \
+  /data4/wxl/MoBLoRA-backup/CoIN/llava_projectors/llava-v1.5-mlp2x-336px-pretrain-vicuna-7b-v1.5/mm_projector.bin)"
 
 # Core paths (override via env when needed)
 COIN_DS_CONFIG="${COIN_DS_CONFIG:-${COIN_REPO_ROOT}/scripts/zero3_offload.json}"
-COIN_BASE_MODEL="${COIN_BASE_MODEL:-${COIN_ASSET_ROOT}/Vicuna/vicuna-7b-v1.5}"
-COIN_VISION_TOWER="${COIN_VISION_TOWER:-${COIN_ASSET_ROOT}/clip-vit-large-patch14-336}"
-COIN_PRETRAIN_PROJECTOR="${COIN_PRETRAIN_PROJECTOR:-${COIN_ASSET_ROOT}/llava_projectors/llava-v1.5-mlp2x-336px-pretrain-vicuna-7b-v1.5/mm_projector.bin}"
-COIN_INSTR_ROOT="${COIN_INSTR_ROOT:-${COIN_ASSET_ROOT}/playground/Instructions_Original}"
-COIN_IMAGE_ROOT="${COIN_IMAGE_ROOT:-${COIN_ASSET_ROOT}}"
+COIN_BASE_MODEL="${COIN_BASE_MODEL:-${DEFAULT_BASE_MODEL}}"
+COIN_VISION_TOWER="${COIN_VISION_TOWER:-${DEFAULT_VISION_TOWER}}"
+COIN_PRETRAIN_PROJECTOR="${COIN_PRETRAIN_PROJECTOR:-${DEFAULT_PRETRAIN_PROJECTOR}}"
+# On 3090 server, instruction jsons and image data are stored separately.
+COIN_INSTR_ROOT="${COIN_INSTR_ROOT:-/data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original}"
+COIN_IMAGE_ROOT="${COIN_IMAGE_ROOT:-/data4/wxl/MoBLoRA-backup/CoIN/cl_dataset}"
 COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-${COIN_REPO_ROOT}/checkpoints/LLaVA/CoIN}"
 
 build_ds_include() {
