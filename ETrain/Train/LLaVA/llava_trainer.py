@@ -294,7 +294,12 @@ def load_model_from_previous_task(model, model_args):
 
     filename = os.path.join(previous_task_model_path, WEIGHTS_NAME)
     adapters_weights = torch.load(filename, map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    load_result = set_peft_model_state_dict(model, adapters_weights, adapter_name="default")
+    if moe_moka_enable:
+        # Keys were saved with adapter_name included (full model key path).
+        # set_peft_model_state_dict does not recognise MOE_MOKA_CoIN; load directly.
+        model.load_state_dict(adapters_weights, strict=False)
+    else:
+        set_peft_model_state_dict(model, adapters_weights, adapter_name="default")
     print('Model is loaded...')
 
 
@@ -446,7 +451,12 @@ class LLaVATrainer(Trainer):
             )
             if training_args.local_rank == 0 or training_args.local_rank == -1:
                 self.model.config.save_pretrained(training_args.output_dir)
-                self.model.save_pretrained(training_args.output_dir, state_dict=state_dict)
+                if getattr(training_args, 'moe_moka_enable', False):
+                    # PeftType.MOE_MOKA_CoIN is not registered in get_peft_model_state_dict;
+                    # save the gathered state_dict directly so keys include adapter_name.
+                    torch.save(state_dict, os.path.join(training_args.output_dir, WEIGHTS_NAME))
+                else:
+                    self.model.save_pretrained(training_args.output_dir, state_dict=state_dict)
                 torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
         else:
             safe_save_model_for_hf_trainer(trainer=self,

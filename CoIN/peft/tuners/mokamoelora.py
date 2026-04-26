@@ -240,8 +240,16 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
         lora_mode = getattr(self, "lora_mode", "all")
 
         if token_mask is not None:
-            text_mask = token_mask == 2  # (B, S)
-            vis_mask = token_mask == 1
+            # During autoregressive generation with KV cache, x has shape (B, 1, d)
+            # while token_mask retains the full prompt length.  Coerce to match.
+            if token_mask.shape[1] != S:
+                token_mask = token_mask[:, -S:] if S <= token_mask.shape[1] else None
+            if token_mask is not None:
+                text_mask = token_mask == 2  # (B, S)
+                vis_mask = token_mask == 1
+            else:
+                text_mask = torch.ones(B, S, dtype=torch.bool, device=x.device)
+                vis_mask = torch.zeros(B, S, dtype=torch.bool, device=x.device)
         else:
             # No mask: treat every non-padding position as text.
             text_mask = torch.ones(B, S, dtype=torch.bool, device=x.device)
