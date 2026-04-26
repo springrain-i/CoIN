@@ -279,14 +279,19 @@ def load_model_from_previous_task(model, model_args):
         non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
     model.load_state_dict(non_lora_trainables, strict=False)
 
-    if model_args.expert_num == None:
-        from peft import PeftModel
-        from peft.utils import WEIGHTS_NAME,set_peft_model_state_dict
-        print('Loading LoRA weights...')
+    _coin_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    if _coin_root not in sys.path:
+        sys.path.insert(0, _coin_root)
+
+    moe_moka_enable = getattr(model_args, "moe_moka_enable", False)
+    if moe_moka_enable or model_args.expert_num is not None:
+        from CoIN.peft import PeftModel, TaskType, get_peft_model, CoINMOELoraConfig, MoEMoKALoraConfig, WEIGHTS_NAME, set_peft_model_state_dict
+        print('Loading CoIN/MoE-MoKA LoRA weights...')
     else:
-        sys.path.append('/home/chencheng/Code/Slim_Train')
-        from CoIN.peft import PeftModel, TaskType, get_peft_model, CoINMOELoraConfig, WEIGHTS_NAME, set_peft_model_state_dict
-            
+        from peft import PeftModel
+        from peft.utils import WEIGHTS_NAME, set_peft_model_state_dict
+        print('Loading LoRA weights...')
+
     filename = os.path.join(previous_task_model_path, WEIGHTS_NAME)
     adapters_weights = torch.load(filename, map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     load_result = set_peft_model_state_dict(model, adapters_weights, adapter_name="default")

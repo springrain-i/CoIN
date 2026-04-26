@@ -34,6 +34,7 @@ class PeftType(str, enum.Enum):
     ADAPTION_PROMPT = "ADAPTION_PROMPT"
     IA3 = "IA3"
     MOE_LORA_CoIN = "MOE_LORA_CoIN"
+    MOE_MOKA_CoIN = "MOE_MOKA_CoIN"
 
 
 class TaskType(str, enum.Enum):
@@ -44,6 +45,7 @@ class TaskType(str, enum.Enum):
     QUESTION_ANS = "QUESTION_ANS"
     FEATURE_EXTRACTION = "FEATURE_EXTRACTION"
     CAUSAL_LM_CoIN = "CAUSAL_LM_CoIN"
+    CAUSAL_LM_MoEMoKA = "CAUSAL_LM_MoEMoKA"
 
 
 @dataclass

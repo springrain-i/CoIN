@@ -123,8 +123,35 @@ def create_LLaVA_model(training_args, model_args, data_args, bnb_model_from_pret
                 output.requires_grad_(True)
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-    if training_args.lora_enable:
-        if model_args.expert_num == None:
+    # Resolve CoIN peft path relative to this file so the hardcoded path is gone.
+    _coin_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    if _coin_root not in sys.path:
+        sys.path.insert(0, _coin_root)
+
+    if getattr(training_args, "moe_moka_enable", False):
+        # MoE-MoKA: modality-specific expert A matrices + shared B + soft routing.
+        from CoIN.peft import (
+            PeftModel, TaskType, get_peft_model,
+            MoEMoKALoraConfig, WEIGHTS_NAME, set_peft_model_state_dict,
+        )
+        lora_config = MoEMoKALoraConfig(
+            r=training_args.lora_r,
+            lora_alpha=training_args.lora_alpha,
+            target_modules=find_all_linear_names(model),
+            lora_dropout=training_args.lora_dropout,
+            bias=training_args.lora_bias,
+            task_type=TaskType.CAUSAL_LM_MoEMoKA,
+            expert_num=model_args.expert_num if model_args.expert_num is not None else 4,
+        )
+        if training_args.bits == 16:
+            if training_args.bf16:
+                model.to(torch.bfloat16)
+            if training_args.fp16:
+                model.to(torch.float16)
+        rank0_print(local_rank, "Adding MoE-MoKA adapters...")
+        model = get_peft_model(model, lora_config)
+    elif training_args.lora_enable:
+        if model_args.expert_num is None:
             from peft import LoraConfig, get_peft_model
             lora_config = LoraConfig(
                 r=training_args.lora_r,
@@ -135,9 +162,8 @@ def create_LLaVA_model(training_args, model_args, data_args, bnb_model_from_pret
                 task_type="CAUSAL_LM",
             )
         else:
-            sys.path.append('/home/chencheng/Code/Slim_Train')
             from CoIN.peft import PeftModel, TaskType, get_peft_model, CoINMOELoraConfig, WEIGHTS_NAME, set_peft_model_state_dict
-            kwargs = { 
+            kwargs = {
                 "task_embedding_dim": model_args.task_embedding_dim,
                 "expert_num": model_args.expert_num,
             }
@@ -155,7 +181,7 @@ def create_LLaVA_model(training_args, model_args, data_args, bnb_model_from_pret
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
-        rank0_print(local_rank,"Adding LoRA adapters...")
+        rank0_print(local_rank, "Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
 
     if 'mpt' in model_args.model_name_or_path:

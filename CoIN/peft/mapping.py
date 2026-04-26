@@ -36,6 +36,7 @@ from .tuners import (
     PromptEncoderConfig,
     PromptTuningConfig,
     CoINMOELoraConfig,
+    MoEMoKALoraConfig,
 )
 from .utils import PromptLearningConfig, _prepare_prompt_learning_config
 
@@ -54,6 +55,7 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "QUESTION_ANS": PeftModelForQuestionAnswering,
     "FEATURE_EXTRACTION": PeftModelForFeatureExtraction,
     "CAUSAL_LM_CoIN": PeftModelForCausalLMLORAMOE,
+    "CAUSAL_LM_MoEMoKA": PeftModelForCausalLMLORAMOE,
 }
 
 PEFT_TYPE_TO_CONFIG_MAPPING = {
@@ -65,6 +67,7 @@ PEFT_TYPE_TO_CONFIG_MAPPING = {
     "ADALORA": AdaLoraConfig,
     "IA3": IA3Config,
     "MOE_LORA_CoIN": CoINMOELoraConfig,
+    "MOE_MOKA_CoIN": MoEMoKALoraConfig,
 }
 
 

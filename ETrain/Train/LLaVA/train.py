@@ -102,6 +102,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
+    moe_moka_enable: bool = False
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 

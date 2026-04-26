@@ -57,6 +57,8 @@ from .tuners import (
     PromptTuningInit,
     CoINMOELoraConfig,
     CoINMOELoraModel,
+    MoEMoKALoraConfig,
+    MoEMoKALoraModel,
 )
 from .utils import (
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
