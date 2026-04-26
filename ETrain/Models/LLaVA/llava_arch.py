@@ -231,6 +231,7 @@ class LlavaMetaForCausalLM(ABC):
         if tokenizer_model_max_length is not None:
             new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
             new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
+            new_token_masks = [x[:tokenizer_model_max_length] for x in new_token_masks]
 
         # Combine them
         max_len = max(x.shape[0] for x in new_input_embeds)

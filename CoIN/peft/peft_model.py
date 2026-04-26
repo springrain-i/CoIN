@@ -48,6 +48,7 @@ from .tuners import (
     PromptEmbedding,
     PromptEncoder,
     CoINMOELoraModel,
+    MoEMoKALoraModel,
 )
 from .utils import (
     SAFETENSORS_WEIGHTS_NAME,
@@ -77,6 +78,7 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
     PeftType.ADAPTION_PROMPT: AdaptionPromptModel,
     PeftType.IA3: IA3Model,
     PeftType.MOE_LORA_CoIN: CoINMOELoraModel,
+    PeftType.MOE_MOKA_CoIN: MoEMoKALoraModel,
 }
 
 

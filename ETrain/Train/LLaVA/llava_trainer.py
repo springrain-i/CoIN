@@ -437,7 +437,7 @@ class LLaVATrainer(Trainer):
 
 
     def save_trained_model(self, training_args):
-        if training_args.lora_enable:
+        if training_args.lora_enable or getattr(training_args, 'moe_moka_enable', False):
             state_dict = get_peft_state_maybe_zero_3(
                 self.model.named_parameters(), training_args.lora_bias
             )

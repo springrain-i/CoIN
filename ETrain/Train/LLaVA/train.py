@@ -63,6 +63,7 @@ class ModelArguments:
 
     task_embedding_dim: Optional[int] = field(default=64)
     expert_num: Optional[int] = field(default=None)
+    moe_moka_enable: bool = field(default=False)
 
     EWC: bool = field(default=False)
     EWC_lambda: float = field(default=0.5)
@@ -102,7 +103,6 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
-    moe_moka_enable: bool = False
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
@@ -115,6 +115,8 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     training_args._frozen = False
     local_rank = training_args.local_rank
+    # Propagate moe_moka_enable so save_trained_model can detect it.
+    training_args.moe_moka_enable = model_args.moe_moka_enable
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     
     bnb_model_from_pretrained_args = {}

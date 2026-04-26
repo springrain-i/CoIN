@@ -128,7 +128,7 @@ def create_LLaVA_model(training_args, model_args, data_args, bnb_model_from_pret
     if _coin_root not in sys.path:
         sys.path.insert(0, _coin_root)
 
-    if getattr(training_args, "moe_moka_enable", False):
+    if getattr(model_args, "moe_moka_enable", False):
         # MoE-MoKA: modality-specific expert A matrices + shared B + soft routing.
         from CoIN.peft import (
             PeftModel, TaskType, get_peft_model,
