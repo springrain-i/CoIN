@@ -15,7 +15,7 @@ require_path "${COIN_PRETRAIN_PROJECTOR}" "mm projector"
 require_path "${COIN_VISION_TOWER}" "vision tower"
 require_path "${DATA_PATH}" "ScienceQA train json"
 
-deepspeed --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
+${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
     --deepspeed ./scripts/zero3_offload.json \
     --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
     --expert_num 4 \

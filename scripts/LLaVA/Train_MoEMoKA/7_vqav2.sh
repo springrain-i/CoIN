@@ -24,7 +24,7 @@ require_path "${COIN_VISION_TOWER}" "vision tower"
 require_path "${DATA_PATH}" "VQAv2 train json"
 require_path "${PREVIOUS_TASK_MODEL_PATH}" "previous task checkpoint"
 
-deepspeed --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
+${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
     --deepspeed ./scripts/zero3_offload.json \
     --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
     --expert_num 4 \

@@ -268,11 +268,18 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
         for i, expert in enumerate(self.lora_experts[adapter]):
             a_out = torch.zeros(B, S, r, device=x.device, dtype=x.dtype)
 
-            if has_text:
-                a_out[text_mask] = expert.lora_A_text(dropped_x[text_mask])
+            # Always call both A matrices so ZeRO-3 traces a consistent module
+            # call order every step.  Pass an empty slice when the modality is
+            # absent; the result is discarded via the mask assignment below.
+            flat_text = dropped_x[text_mask]  # (n_text, d_in)  — may be empty
+            flat_vis = dropped_x[vis_mask]    # (n_vis,  d_in)  — may be empty
+            out_text = expert.lora_A_text(flat_text)
+            out_vis = expert.lora_A_vis(flat_vis)
 
+            if has_text:
+                a_out[text_mask] = out_text
             if has_vis:
-                a_out[vis_mask] = expert.lora_A_vis(dropped_x[vis_mask])
+                a_out[vis_mask] = out_vis
 
             # Cross-attention: visual tokens (query) attend to text tokens (k/v).
             # Operates in the cheap rank-r space; no extra projection matrices.
