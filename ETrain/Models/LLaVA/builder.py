@@ -75,17 +75,32 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
             model.load_state_dict(non_lora_trainables, strict=False)
 
-            if 'MOE' in model_name:
-                from CoIN.peft import PeftModel, TaskType, get_peft_model, CoINMOELoraConfig, WEIGHTS_NAME, set_peft_model_state_dict
+            is_moe_moka = 'moka' in model_name.lower()
+            if 'MOE' in model_name or is_moe_moka:
+                from CoIN.peft import PeftModel, get_peft_model, CoINMOELoraConfig, MoEMoKALoraConfig, WEIGHTS_NAME
             else:
                 from CoIN.peft import PeftModel
-            print('Loading LoRA weights...')
-            model = PeftModel.from_pretrained(model, model_path)
-            if merge_lora:
-                print('Merging LoRA weights...')
-                model = model.merge_and_unload()
+                from peft.utils import WEIGHTS_NAME
+
+            if is_moe_moka:
+                # MoE-MoKA: reconstruct adapter from saved adapter_config.json,
+                # then load weights directly (set_peft_model_state_dict does not
+                # support MOE_MOKA_CoIN; keys in adapter_model.bin include .default).
+                print('Loading MoE-MoKA LoRA weights...')
+                adapter_config = MoEMoKALoraConfig.from_pretrained(model_path)
+                model = get_peft_model(model, adapter_config)
+                weights = torch.load(os.path.join(model_path, WEIGHTS_NAME),
+                                     map_location='cpu')
+                model.load_state_dict(weights, strict=False)
+                # MoE-MoKA merge is not implemented; always keep unmerged.
             else:
-                print('Skipping merging LoRA weights...')
+                print('Loading LoRA weights...')
+                model = PeftModel.from_pretrained(model, model_path)
+                if merge_lora:
+                    print('Merging LoRA weights...')
+                    model = model.merge_and_unload()
+                else:
+                    print('Skipping merging LoRA weights...')
             print('Model is loaded...')
         elif model_base is not None:
             # this may be mm projector only

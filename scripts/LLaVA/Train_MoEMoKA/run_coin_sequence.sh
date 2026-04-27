@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 source "${SCRIPT_DIR}/coin_paths.sh"
 
-EVAL_SCRIPT_DIR="${REPO_ROOT}/scripts/LLaVA/Eval"
-PARSE_ACC_PY="${EVAL_SCRIPT_DIR}/parse_accuracy.py"
+EVAL_SCRIPT_DIR="${SCRIPT_DIR}/eval"
+PARSE_ACC_PY="${REPO_ROOT}/scripts/LLaVA/Eval/parse_accuracy.py"
 
 # Fixed CoIN continual order: 1->8
 TASK_SCRIPTS=(
@@ -38,7 +38,7 @@ TASK_NAMES=(
 EVAL_SCRIPTS=(
   "${EVAL_SCRIPT_DIR}/1_eval_sqa.sh"
   "${EVAL_SCRIPT_DIR}/2_eval_textqa.sh"
-  "${EVAL_SCRIPT_DIR}/3_eval_ImageNet.sh"
+  "${EVAL_SCRIPT_DIR}/3_eval_imagenet.sh"
   "${EVAL_SCRIPT_DIR}/4_eval_gqa.sh"
   "${EVAL_SCRIPT_DIR}/5_eval_vizwiz.sh"
   "${EVAL_SCRIPT_DIR}/6_eval_grounding.sh"
@@ -46,15 +46,17 @@ EVAL_SCRIPTS=(
   "${EVAL_SCRIPT_DIR}/8_eval_ocrvqa.sh"
 )
 
+# MoEMoKA results live under a single root (set in eval_common.sh via coin_paths.sh)
+MOEMOKA_RESULT_ROOT="${COIN_REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA"
 RESULT_DIRS=(
-  "${REPO_ROOT}/results/CoIN/LLaVA/ScienceQA_NoMerge_Visual"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_ON_ImageNet_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/GQA_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VizWiz"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Grounding"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VQAv2"
-  "${REPO_ROOT}/results/CoIN/LLaVA/OCRVQA"
+  "${MOEMOKA_RESULT_ROOT}/ScienceQA"
+  "${MOEMOKA_RESULT_ROOT}/TextVQA"
+  "${MOEMOKA_RESULT_ROOT}/ImageNet"
+  "${MOEMOKA_RESULT_ROOT}/GQA"
+  "${MOEMOKA_RESULT_ROOT}/VizWiz"
+  "${MOEMOKA_RESULT_ROOT}/Grounding"
+  "${MOEMOKA_RESULT_ROOT}/VQAv2"
+  "${MOEMOKA_RESULT_ROOT}/OCRVQA"
 )
 
 MODES=${MODES:-"all text visual"}
