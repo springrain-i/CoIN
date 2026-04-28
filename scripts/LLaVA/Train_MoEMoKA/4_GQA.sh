@@ -25,7 +25,7 @@ require_path "${DATA_PATH}" "GQA train json"
 require_path "${PREVIOUS_TASK_MODEL_PATH}" "previous task checkpoint"
 
 ${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
-    --deepspeed ./scripts/zero3_offload.json \
+    --deepspeed "${COIN_DS_CONFIG:-./scripts/zero3.json}" \
     --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
     --expert_num 4 \
     --model_name_or_path "${COIN_BASE_MODEL}" \

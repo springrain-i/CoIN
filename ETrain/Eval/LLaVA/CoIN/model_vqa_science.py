@@ -106,7 +106,7 @@ def eval_model(args):
                 images=images,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
-                max_new_tokens=1024,
+                max_new_tokens=args.max_new_tokens,
                 use_cache=True,
                 stopping_criteria=stopping_criteria,
             )
@@ -200,6 +200,7 @@ if __name__ == "__main__":
         default="all",
         choices=["all", "text", "vision"],
     )  # 三个选项: all, text, vision
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     args = parser.parse_args()
 
     eval_model(args)

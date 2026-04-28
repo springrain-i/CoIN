@@ -16,6 +16,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --num-chunks "$CHUNKS" \
         --chunk-idx "$IDX" \
         --temperature 0 \
+        --max-new-tokens "${MAX_NEW_TOKENS:-1024}" \
         --merge-lora False \
         --lora-mode "$LORA_MODE" \
         --conv-mode vicuna_v1 &

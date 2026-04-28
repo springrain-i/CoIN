@@ -83,7 +83,7 @@ for i in "${!TASK_NAMES[@]}"; do
 
     ${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29603 \
         ETrain/Train/LLaVA/train_mem.py \
-        --deepspeed ./scripts/zero3_offload.json \
+        --deepspeed "${COIN_DS_CONFIG:-./scripts/zero3.json}" \
         --moe_moka_enable True \
         --lora_r 32 \
         --lora_alpha 64 \

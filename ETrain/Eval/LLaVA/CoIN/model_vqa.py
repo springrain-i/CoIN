@@ -102,7 +102,7 @@ def eval_model(args):
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 # no_repeat_ngram_size=3,
-                max_new_tokens=1024,
+                max_new_tokens=args.max_new_tokens,
                 use_cache=True)
 
         input_token_len = input_ids.shape[1]
@@ -161,6 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--merge-lora", type=str2bool, default=True)
     parser.add_argument(
         "--lora-mode",
