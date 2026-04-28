@@ -1,47 +1,47 @@
-# MoE-MoKA Implementation Guide
+# MoE-MoKA 实现说明文档
 
-**Purpose:** Human-review reference for the MoE-MoKA (Mixture-of-Experts Multimodal LoRA Adaptation) implementation in the CoIN continual learning framework.
+**用途：** 供人工审查的 MoE-MoKA（混合专家多模态 LoRA 适配）在 CoIN 持续学习框架中的完整实现参考。
 
 ---
 
-## 1. What Is MoE-MoKA
+## 1. MoE-MoKA 是什么
 
-MoE-MoKA extends MoKA (NeurIPS 2025) with a mixture-of-experts routing layer. Each expert holds modality-specific A matrices `(A_text_i, A_vis_i)` for i=1..N. A soft router (softmax) blends expert outputs before multiplying by a shared B matrix.
+MoE-MoKA 在 MoKA（NeurIPS 2025）基础上引入了混合专家路由层。每个专家持有模态专用的 A 矩阵对 `(A_text_i, A_vis_i)`，i=1..N。软路由器（softmax）对专家输出加权融合后，再与共享 B 矩阵相乘。
 
-**Core forward for each LoRA linear layer:**
+**每个 LoRA 线性层的核心前向公式：**
 
 ```
 ΔW·x = B · Σ_i  w_i · [ A_text_i · x_text  ;  A_vis_i · x_vis + CrossAttn(A_vis_i·x_vis, A_text_i·x_text) ]
 ```
 
-where:
-- `x_text`, `x_vis` = tokens sliced by `token_mask` (2=text, 1=visual, 0=pad)
-- `w_i` = router softmax weight for expert i (router input = mean of all token A-outputs)
-- Cross-attention: visual tokens (Q) attend to text tokens (K, V) in rank-r space, scaled by `lora_attn` (learnable scalar)
-- B is shared across all experts
+其中：
+- `x_text`、`x_vis` = 由 `token_mask` 切分的 token（2=文本，1=视觉，0=padding）
+- `w_i` = 专家 i 的路由 softmax 权重（路由器输入为所有 token A 输出的均值）
+- 交叉注意力：视觉 token（Q）在 rank-r 空间内关注文本 token（K, V），由可学习标量 `lora_attn` 缩放
+- B 矩阵在所有专家间共享
 
 ---
 
-## 2. File Map
+## 2. 文件地图
 
-| File | Role |
+| 文件 | 作用 |
 |------|------|
-| `CoIN/peft/tuners/mokamoelora.py` | **Core MoE-MoKA layer** — config, linear module, forward |
-| `CoIN/peft/mapping.py` | Registers `MoEMoKALoraConfig` and `PeftModelForCausalLMLORAMOE` |
-| `CoIN/peft/utils/save_and_load.py` | PEFT save/load — **bypassed** for MoE-MoKA (see §5) |
-| `ETrain/Train/LLaVA/train.py` | Training entry; `ModelArguments.moe_moka_enable` flag |
+| `CoIN/peft/tuners/mokamoelora.py` | **核心 MoE-MoKA 层** — 配置、线性模块、前向计算 |
+| `CoIN/peft/mapping.py` | 注册 `MoEMoKALoraConfig` 和 `PeftModelForCausalLMLORAMOE` |
+| `CoIN/peft/utils/save_and_load.py` | PEFT 存取工具 — MoE-MoKA **绕过**此处（见第5节） |
+| `ETrain/Train/LLaVA/train.py` | 训练入口；`ModelArguments.moe_moka_enable` 标志 |
 | `ETrain/Train/LLaVA/llava_trainer.py` | `save_trained_model` + `load_model_from_previous_task` |
-| `ETrain/Models/LLaVA/builder.py` | Eval-time model loading (`load_pretrained_model`) |
-| `ETrain/Models/LLaVA/llava_arch.py` | Sets `current_lora_mask` (token_mask) on model |
-| `ETrain/Models/LLaVA/language_model/llava_llama.py` | `_apply_lora_token_mask()` propagates mask to each layer |
+| `ETrain/Models/LLaVA/builder.py` | 评测时模型加载（`load_pretrained_model`） |
+| `ETrain/Models/LLaVA/llava_arch.py` | 在模型上设置 `current_lora_mask`（token_mask） |
+| `ETrain/Models/LLaVA/language_model/llava_llama.py` | `_apply_lora_token_mask()` 将 mask 传播到每一层 |
 
 ---
 
-## 3. Core Module: `mokamoelora.py`
+## 3. 核心模块：`mokamoelora.py`
 
-**Path:** `CoIN/peft/tuners/mokamoelora.py`
+**路径：** `CoIN/peft/tuners/mokamoelora.py`
 
-### 3.1 Config — `MoEMoKALoraConfig`
+### 3.1 配置 — `MoEMoKALoraConfig`
 
 ```python
 @dataclass
@@ -50,36 +50,36 @@ class MoEMoKALoraConfig(LoraConfig):
     expert_num: int = field(default=4)
 ```
 
-Inherits all standard LoRA hyperparameters (`r`, `lora_alpha`, `target_modules`, etc.).
+继承所有标准 LoRA 超参数（`r`、`lora_alpha`、`target_modules` 等）。
 
-### 3.2 Layer — `MoEMoKALoraLinear`
+### 3.2 层 — `MoEMoKALoraLinear`
 
-**Key attributes:**
+**关键属性：**
 
-| Attribute | Shape | Description |
-|-----------|-------|-------------|
-| `lora_A_text[adapter]` | `nn.ModuleList` of N `nn.Linear(in, r, bias=False)` | Per-expert text A matrices |
-| `lora_A_vis[adapter]` | `nn.ModuleList` of N `nn.Linear(in, r, bias=False)` | Per-expert visual A matrices |
-| `lora_B[adapter]` | `nn.Linear(r, out, bias=False)` | Shared B matrix |
-| `lora_router[adapter]` | `nn.Linear(r, N, bias=False)` | Soft router |
-| `lora_attn[adapter]` | `nn.ParameterDict` → scalar | Cross-attention gate |
+| 属性 | Shape | 说明 |
+|------|-------|------|
+| `lora_A_text[adapter]` | N 个 `nn.Linear(in, r, bias=False)` 的 ModuleList | 各专家的文本 A 矩阵 |
+| `lora_A_vis[adapter]` | N 个 `nn.Linear(in, r, bias=False)` 的 ModuleList | 各专家的视觉 A 矩阵 |
+| `lora_B[adapter]` | `nn.Linear(r, out, bias=False)` | 共享 B 矩阵 |
+| `lora_router[adapter]` | `nn.Linear(r, N, bias=False)` | 软路由器 |
+| `lora_attn[adapter]` | `nn.ParameterDict` → 标量 | 交叉注意力门控 |
 
-**Init:** A matrices use Kaiming uniform, B is zero-initialized (so ΔW=0 at start).
+**初始化：** A 矩阵使用 Kaiming uniform，B 初始化为零（确保初始 ΔW=0，与标准 LoRA 一致）。
 
-### 3.3 Forward Pass
+### 3.3 前向传播
 
-**File:** `mokamoelora.py` → `MoEMoKALoraLinear.forward()`
+**文件：** `mokamoelora.py` → `MoEMoKALoraLinear.forward()`
 
-Step-by-step:
+逐步说明：
 
-1. **Token mask slicing** (lines ~180-210): If `token_mask.shape[1] != S` (generation with KV-cache), trim mask to `token_mask[:, -S:]`. Fall back to all-text mask if still mismatched.
-2. **Unconditional A calls** (lines ~220-250): Each expert's A_text and A_vis are always called (even if `has_text=False` or `has_vis=False`), then conditionally written to `a_out`. This is required for ZeRO-3 trace consistency.
-3. **Cross-attention** (lines ~255-275): Visual A-outputs (Q) attend to text A-outputs (K, V) via `_cross_attention()`. Output scaled by `lora_attn` scalar.
-4. **Router** (lines ~280-300): Mean-pool `a_out`, pass through `lora_router`, softmax → weights `w`.
-5. **Expert blend** (lines ~300-320): `Σ_i w_i * per_expert_a_out_i`, then `lora_B(blended)`.
-6. **Residual** (lines ~320-330): Add LoRA delta to base linear output, scaled by `lora_alpha / r`.
+1. **Token mask 裁剪**（约第180-210行）：若 `token_mask.shape[1] != S`（KV-cache 生成时），将 mask 裁剪为 `token_mask[:, -S:]`；仍不匹配则回退到全文本 mask。
+2. **无条件 A 矩阵调用**（约第220-250行）：每个专家的 A_text 和 A_vis 始终被调用（即使 `has_text=False` 或 `has_vis=False`），结果再按条件写入 `a_out`。这是 ZeRO-3 trace 一致性的必要条件。
+3. **交叉注意力**（约第255-275行）：视觉 A 输出（Q）通过 `_cross_attention()` 关注文本 A 输出（K, V），结果由 `lora_attn` 标量缩放。
+4. **路由器**（约第280-300行）：对 `a_out` 均值池化，经 `lora_router` + softmax 得权重 `w`。
+5. **专家融合**（约第300-320行）：`Σ_i w_i * per_expert_a_out_i`，再经 `lora_B` 输出。
+6. **残差相加**（约第320-330行）：将 LoRA 增量加到基础线性输出，缩放系数为 `lora_alpha / r`。
 
-### 3.4 Cross-Attention — `_cross_attention()`
+### 3.4 交叉注意力 — `_cross_attention()`
 
 ```python
 def _cross_attention(self, q, k):
@@ -90,42 +90,42 @@ def _cross_attention(self, q, k):
     return weights @ k                  # (n_vis, r)
 ```
 
-No learned projections — A matrices serve as Q/K/V projectors directly (faithful to MoKA paper).
+无额外学习投影 — A 矩阵直接充当 Q/K/V 投影器（忠实于 MoKA 论文设计）。
 
 ---
 
-## 4. Token Mask Infrastructure
+## 4. Token Mask 基础设施
 
-**Set in:** `ETrain/Models/LLaVA/llava_arch.py` → `prepare_inputs_labels_for_multimodal()`
+**设置于：** `ETrain/Models/LLaVA/llava_arch.py` → `prepare_inputs_labels_for_multimodal()`
 
 ```
-token_mask value:  2 = text token,  1 = visual token,  0 = pad
+token_mask 取值：  2 = 文本 token，  1 = 视觉 token，  0 = padding
 ```
 
-**Propagated by:** `ETrain/Models/LLaVA/language_model/llava_llama.py` → `_apply_lora_token_mask()`
-Called once per forward pass; sets `token_mask` attribute on every LoRA module.
+**传播路径：** `ETrain/Models/LLaVA/language_model/llava_llama.py` → `_apply_lora_token_mask()`
+每次前向传播调用一次，将 `token_mask` 属性设置到每个 LoRA 模块上。
 
-**Used in:** `MoEMoKALoraLinear.forward()` to route tokens to correct A matrices.
+**使用位置：** `MoEMoKALoraLinear.forward()` 中，用于将 token 路由到对应的 A 矩阵。
 
 ---
 
-## 5. Save / Load
+## 5. 保存与加载
 
-### 5.1 Why Standard PEFT Save/Load Is Bypassed
+### 5.1 为何绕过标准 PEFT 存取
 
-`CoIN/peft/utils/save_and_load.py`:
-- `get_peft_model_state_dict()` has a type whitelist that does **not** include `MOE_MOKA_CoIN` → raises `NotImplementedError`.
-- `set_peft_model_state_dict()` same issue, plus key rewriting breaks for nested `lora_` keys.
+`CoIN/peft/utils/save_and_load.py`：
+- `get_peft_model_state_dict()` 有类型白名单，**不含** `MOE_MOKA_CoIN` → 抛出 `NotImplementedError`。
+- `set_peft_model_state_dict()` 同样问题，且对嵌套 `lora_` key 的重写逻辑会出错。
 
-**Decision:** bypass both for MoE-MoKA, use direct `torch.save` / `model.load_state_dict(strict=False)`.
+**决策：** MoE-MoKA 完全绕过上述两个函数，改用 `torch.save` / `model.load_state_dict(strict=False)`。
 
-### 5.2 Training Save — `save_trained_model`
+### 5.2 训练保存 — `save_trained_model`
 
-**File:** `ETrain/Train/LLaVA/llava_trainer.py` lines ~444-470
+**文件：** `ETrain/Train/LLaVA/llava_trainer.py` 约第444-470行
 
 ```python
 if getattr(training_args, 'moe_moka_enable', False):
-    # Collect ZeRO-3 shards via get_peft_state_maybe_zero_3
+    # 通过 get_peft_state_maybe_zero_3 收集 ZeRO-3 分片
     state_dict = get_peft_state_maybe_zero_3(self.model.named_parameters(), training_args.lora_bias)
     if training_args.local_rank in (0, -1):
         self.model.config.save_pretrained(training_args.output_dir)
@@ -134,52 +134,57 @@ if getattr(training_args, 'moe_moka_enable', False):
         torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
 ```
 
-**Files written per task:**
+**每个任务保存的文件：**
 ```
 <output_dir>/
-├── adapter_model.bin          # MoE-MoKA weights (all lora_ params)
-├── adapter_config.json        # MoEMoKALoraConfig (reconstructed by from_pretrained)
+├── adapter_model.bin          # MoE-MoKA 权重（所有 lora_ 参数）
+├── adapter_config.json        # MoEMoKALoraConfig（由 from_pretrained 重建）
 ├── non_lora_trainables.bin    # mm_projector + embed_tokens
-└── config.json                # LLaVA model config
+└── config.json                # LLaVA 模型配置
 ```
 
-### 5.3 Training Load — `load_model_from_previous_task`
+### 5.3 训练加载 — `load_model_from_previous_task`
 
-**File:** `ETrain/Train/LLaVA/llava_trainer.py` lines ~295-330
+**文件：** `ETrain/Train/LLaVA/llava_trainer.py` 约第295-330行
 
 ```python
 if moe_moka_enable:
-    # Keys in adapter_model.bin include ".default." — matches model state dict directly
+    # adapter_model.bin 中的 key 含 ".default."，与模型 state dict 直接匹配
     model.load_state_dict(adapters_weights, strict=False)
 else:
     set_peft_model_state_dict(model, adapters_weights, adapter_name="default")
 ```
 
-Called at the start of each task (task 2 through 8) to load the previous task's adapter before continuing training.
+在每个任务开始（第2到第8个任务）前调用，加载上一任务的 adapter 后继续训练。
 
-### 5.4 Eval Load — `load_pretrained_model`
+### 5.4 评测加载 — `load_pretrained_model`
 
-**File:** `ETrain/Models/LLaVA/builder.py` lines ~78-104
+**文件：** `ETrain/Models/LLaVA/builder.py` 约第78-110行
 
 ```python
-is_moe_moka = 'moka' in model_name.lower()
+# 通过读取 adapter_config.json 判断类型（比依赖模型名更可靠）
+_adapter_config_path = os.path.join(model_path, 'adapter_config.json')
+if os.path.exists(_adapter_config_path):
+    _peft_type = json.load(open(_adapter_config_path)).get('peft_type', '')
+is_moe_moka = (_peft_type == 'MOE_MOKA_CoIN') or ('moka' in model_name.lower())
+
 if is_moe_moka:
     adapter_config = MoEMoKALoraConfig.from_pretrained(model_path)
     model = get_peft_model(model, adapter_config)
     weights = torch.load(os.path.join(model_path, WEIGHTS_NAME), map_location='cpu')
     model.load_state_dict(weights, strict=False)
-    # MoE-MoKA merge is not implemented; always runs unmerged.
+    # MoE-MoKA 不支持合并；始终保持未合并状态。
 ```
 
-The model name must contain `"moka"` (case-insensitive) to trigger this path. All MoEMoKA training scripts output to directories named `*_MoEMoKA_lora` which satisfies this requirement.
+**重要：** 检测方式优先读 `adapter_config.json` 中的 `peft_type`，不再依赖目录名包含 "moka"，确保任意命名的 checkpoint 均可正确加载。
 
 ---
 
-## 6. Training Entry Points
+## 6. 训练入口
 
 ### 6.1 `ModelArguments.moe_moka_enable`
 
-**File:** `ETrain/Train/LLaVA/train.py` line ~64
+**文件：** `ETrain/Train/LLaVA/train.py` 约第64行
 
 ```python
 @dataclass
@@ -189,11 +194,11 @@ class ModelArguments:
     expert_num: int = field(default=4)
 ```
 
-Propagated to `training_args.moe_moka_enable` at line ~119 before `Trainer` construction.
+在 `Trainer` 构建前（约第119行）传播到 `training_args.moe_moka_enable`。
 
-### 6.2 PEFT Wrapping
+### 6.2 PEFT 包装
 
-**File:** `ETrain/Train/LLaVA/train.py` lines ~200-250 (approximate)
+**文件：** `ETrain/Train/LLaVA/train.py` 约第200-250行
 
 ```python
 if model_args.moe_moka_enable:
@@ -207,80 +212,80 @@ if model_args.moe_moka_enable:
 
 ---
 
-## 7. ZeRO-3 Compatibility
+## 7. ZeRO-3 兼容性
 
-### Problem
+### 问题
 
-DeepSpeed ZeRO-3 partitions parameters across GPUs and rebuilds them only when a module's `__call__` is traced at launch. Conditional `if has_text: expert.lora_A_text(flat_text)` breaks the trace because one branch may never be called on one rank.
+DeepSpeed ZeRO-3 在启动时通过 trace 模块调用顺序来预取参数分片。若代码中出现 `if has_text: expert.lora_A_text(flat_text)` 这样的条件调用，某个 rank 上可能永远不执行某个分支，导致 trace 缓存不一致，进而引发 NCCL hang 或梯度错误。
 
-### Fix
+### 修复方案
 
-All A matrices are called unconditionally (dummy tensor if the modality is absent):
+所有 A 矩阵无条件调用（若对应模态不存在则传入空张量）：
 
 ```python
-out_text = expert.lora_A_text(flat_text)   # always called
-out_vis  = expert.lora_A_vis(flat_vis)     # always called
+out_text = expert.lora_A_text(flat_text)   # 始终调用
+out_vis  = expert.lora_A_vis(flat_vis)     # 始终调用
 if has_text:
     a_out[text_mask] = out_text
 if has_vis:
     a_out[vis_mask]  = out_vis
 ```
 
-**File:** `CoIN/peft/tuners/mokamoelora.py` lines ~220-260
+**文件：** `CoIN/peft/tuners/mokamoelora.py` 约第220-260行
 
 ---
 
-## 8. Continual Learning Sequence
+## 8. 持续学习序列
 
-### Script Orchestration
+### 脚本结构
 
 ```
 scripts/LLaVA/Train_MoEMoKA/
-├── coin_paths.sh             # Centralized paths; auto-detects GPUs
-├── 1_Science.sh              # Task 1 training (no previous task)
-├── 2_TextVQA.sh              # Task 2 training (loads Task 1 adapter)
+├── coin_paths.sh             # 路径中心化配置；自动检测 GPU 数量
+├── 1_Science.sh              # 任务1训练（无前序任务）
+├── 2_TextVQA.sh              # 任务2训练（加载任务1 adapter）
 ├── ...
-├── 8_OCRVQA.sh               # Task 8 training (loads Task 7 adapter)
-├── run_coin_sequence.sh      # Orchestrates all 8 tasks + online eval
-├── mini_pipeline_test.sh     # 3-step smoke test for all 8 tasks
+├── 8_OCRVQA.sh               # 任务8训练（加载任务7 adapter）
+├── run_coin_sequence.sh      # 编排全部8个任务 + 在线评测
+├── mini_pipeline_test.sh     # 全8任务3步 mini 冒烟测试
 └── eval/
-    ├── eval_common.sh        # Shared eval setup (sources coin_paths.sh)
-    ├── 1_eval_sqa.sh         # ScienceQA eval
-    ├── 2_eval_textqa.sh      # TextVQA eval
+    ├── eval_common.sh        # 共享评测环境（source coin_paths.sh）
+    ├── 1_eval_sqa.sh         # ScienceQA 评测
+    ├── 2_eval_textqa.sh      # TextVQA 评测
     ├── ...
-    └── 8_eval_ocrvqa.sh      # OCRVQA eval
+    └── 8_eval_ocrvqa.sh      # OCRVQA 评测
 ```
 
-### Task-to-Task Checkpoint Flow
+### 任务间 Checkpoint 流转
 
 ```
-Task 1: base model → [train] → ScienceQA_llava_MoEMoKA_lora/
-Task 2: ScienceQA_llava_MoEMoKA_lora/ → [load] → [train] → TextVQA_llava_MoEMoKA_lora/
-Task 3: TextVQA_llava_MoEMoKA_lora/ → [load] → [train] → ImageNet_llava_MoEMoKA_lora/
+任务1：基础模型 → [训练] → ScienceQA_llava_MoEMoKA_lora/
+任务2：ScienceQA_llava_MoEMoKA_lora/ → [加载] → [训练] → TextVQA_llava_MoEMoKA_lora/
+任务3：TextVQA_llava_MoEMoKA_lora/ → [加载] → [训练] → ImageNet_llava_MoEMoKA_lora/
 ...
-Task 8: VQAv2_llava_MoEMoKA_lora/ → [load] → [train] → OCRVQA_llava_MoEMoKA_lora/
+任务8：VQAv2_llava_MoEMoKA_lora/ → [加载] → [训练] → OCRVQA_llava_MoEMoKA_lora/
 ```
 
-### How to Run
+### 运行方式
 
-**Full continual training (4 or 8 GPU):**
+**完整持续学习训练（4卡或8卡）：**
 ```bash
-# From repo root, with conda env active:
+# 在仓库根目录，激活 conda 环境后执行：
 bash scripts/LLaVA/Train_MoEMoKA/run_coin_sequence.sh
-# Or specific task range:
+# 或指定任务范围：
 bash scripts/LLaVA/Train_MoEMoKA/run_coin_sequence.sh 1 8
 ```
 
-**Mini smoke test (any GPU count, ~3 steps per task):**
+**Mini 冒烟测试（任意 GPU 数量，每任务约3步）：**
 ```bash
 bash scripts/LLaVA/Train_MoEMoKA/mini_pipeline_test.sh
-# Skip eval:
+# 跳过评测：
 SKIP_EVAL=1 bash scripts/LLaVA/Train_MoEMoKA/mini_pipeline_test.sh
 ```
 
-**Eval only (after training):**
+**单独评测（训练完成后）：**
 ```bash
-# Args: STAGE  MODEL_PATH  LORA_MODE
+# 参数：STAGE  MODEL_PATH  LORA_MODE
 bash scripts/LLaVA/Train_MoEMoKA/eval/1_eval_sqa.sh \
     Task1 \
     checkpoints/LLaVA/CoIN/ScienceQA_llava_MoEMoKA_lora \
@@ -289,27 +294,28 @@ bash scripts/LLaVA/Train_MoEMoKA/eval/1_eval_sqa.sh \
 
 ---
 
-## 9. Known Deviations From MoKA Paper
+## 9. 与 MoKA 论文的已知差异
 
-| Item | Paper | Implementation | Reason |
-|------|-------|----------------|--------|
-| Cross-attn scale | `sqrt(N_t)` (number of text tokens) | `sqrt(d_k)` (rank r) | Standard attention scale; N_t varies per sample making it unstable |
-| Cross-attn gate | None | `lora_attn` learnable scalar | Extra expressivity; initialized to small value |
-| Continual learning | Not covered | Load previous task adapter | CoIN requirement |
+| 项目 | 论文 | 实现 | 原因 |
+|------|------|------|------|
+| 交叉注意力缩放因子 | `sqrt(N_t)`（文本 token 数量） | `sqrt(d_k)`（rank r） | 标准注意力缩放；N_t 随样本变化导致不稳定 |
+| 交叉注意力门控 | 无 | `lora_attn` 可学习标量 | 增加表达能力；初始化为小值 |
+| 持续学习 | 论文未涉及 | 加载上一任务 adapter | CoIN 框架需求 |
 
 ---
 
-## 10. Quick Verification
+## 10. 快速验证
 
-After training a task, verify the checkpoint:
+**训练完一个任务后，验证 checkpoint：**
 ```bash
 ls checkpoints/LLaVA/CoIN/ScienceQA_llava_MoEMoKA_lora/
-# Expected:
+# 预期输出：
 # adapter_config.json   adapter_model.bin   config.json   non_lora_trainables.bin
 ```
 
-After eval, check result:
+**评测完成后，查看准确率：**
 ```bash
-# ScienceQA: acc in output_result.jsonl
-cat results/CoIN/LLaVA/MoEMoKA/ScienceQA/<STAGE>/output_result.jsonl | python -c "import json,sys; print(json.load(sys.stdin)['acc'])"
+# ScienceQA：准确率在 output_result.jsonl 中
+cat results/CoIN/LLaVA/MoEMoKA/ScienceQA/<STAGE>/output_result.jsonl \
+    | python -c "import json,sys; print(json.load(sys.stdin)['acc'])"
 ```

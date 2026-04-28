@@ -43,7 +43,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         kwargs['torch_dtype'] = torch.float16
 
-    if 'llava' in model_name.lower():
+    # MoE-MoKA checkpoints are LLaVA models; detect via adapter_config.json
+    # when the checkpoint path doesn't follow the *llava* naming convention.
+    _is_llava_adapter = False
+    if model_base is not None and os.path.exists(os.path.join(model_path, 'adapter_config.json')):
+        import json as _json
+        with open(os.path.join(model_path, 'adapter_config.json')) as _f:
+            _is_llava_adapter = _json.load(_f).get('task_type', '').startswith('CAUSAL_LM')
+
+    if 'llava' in model_name.lower() or _is_llava_adapter:
         # Load LLaVA model
         if 'lora' in model_name.lower() and model_base is None:
             warnings.warn('There is `lora` in model name but no `model_base` is provided. If you are loading a LoRA model, please provide the `model_base` argument. Detailed instruction: https://github.com/haotian-liu/LLaVA#launch-a-model-worker-lora-weights-unmerged.')
@@ -75,8 +83,17 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
             model.load_state_dict(non_lora_trainables, strict=False)
 
-            is_moe_moka = 'moka' in model_name.lower()
-            if 'MOE' in model_name or is_moe_moka:
+            # Detect adapter type from adapter_config.json (authoritative),
+            # falling back to model_name heuristic for backwards compatibility.
+            _adapter_config_path = os.path.join(model_path, 'adapter_config.json')
+            _peft_type = ''
+            if os.path.exists(_adapter_config_path):
+                import json as _json
+                with open(_adapter_config_path) as _f:
+                    _peft_type = _json.load(_f).get('peft_type', '')
+            is_moe_moka = (_peft_type == 'MOE_MOKA_CoIN') or ('moka' in model_name.lower())
+            is_coin_moe = (_peft_type == 'MOE_CoIN') or ('MOE' in model_name)
+            if is_moe_moka or is_coin_moe:
                 from CoIN.peft import PeftModel, get_peft_model, CoINMOELoraConfig, MoEMoKALoraConfig, WEIGHTS_NAME
             else:
                 from CoIN.peft import PeftModel
@@ -154,7 +171,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
     image_processor = None
 
-    if 'llava' in model_name.lower():
+    if 'llava' in model_name.lower() or _is_llava_adapter:
         mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
         mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
         if mm_use_im_patch_token:

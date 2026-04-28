@@ -66,7 +66,7 @@ PREV_CKPT=""
 for i in "${!TASK_NAMES[@]}"; do
     TASK="${TASK_NAMES[$i]}"
     DATA="${TASK_DATA[$i]}"
-    OUT_DIR="${MINI_OUTPUT_ROOT}/${TASK}_lora"
+    OUT_DIR="${MINI_OUTPUT_ROOT}/${TASK}_llava_MoEMoKA_lora"
 
     echo ""
     echo "────────────────────────────────────────────────────────────"
@@ -158,7 +158,7 @@ fi
 
 echo ""
 echo "[mini_pipeline] Running eval for task 1 (ScienceQA) using T8 checkpoint..."
-EVAL_MODEL="${MINI_OUTPUT_ROOT}/OCRVQA_lora"
+EVAL_MODEL="${MINI_OUTPUT_ROOT}/OCRVQA_llava_MoEMoKA_lora"
 EVAL_STAGE="mini_pipeline_test"
 
 bash "${EVAL_SCRIPTS[0]}" "${EVAL_STAGE}" "${EVAL_MODEL}" "all"
