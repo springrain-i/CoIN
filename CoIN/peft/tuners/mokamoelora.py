@@ -62,7 +62,7 @@ class MoEMoKALoraConfig(LoraConfig):
     r must be divisible by expert_num.
     """
     expert_num: int = field(
-        default=4,
+        default=8,
         metadata={"help": "Number of MoE experts. r must be divisible by expert_num."},
     )
 

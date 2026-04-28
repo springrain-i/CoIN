@@ -37,7 +37,22 @@ DEFAULT_IMAGE_ROOT="$(resolve_first_existing_path \
   /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset)"
 
 # Core paths (override via env when needed)
-COIN_DS_CONFIG="${COIN_DS_CONFIG:-${COIN_REPO_ROOT}/scripts/zero3_offload.json}"
+# Auto-select DeepSpeed config: offload for single-GPU, zero3 for multi-GPU.
+# Override with COIN_DS_CONFIG env var when needed.
+_auto_gpu_count=0
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=',' read -r -a _cvd <<< "${CUDA_VISIBLE_DEVICES}"
+  _auto_gpu_count=${#_cvd[@]}
+else
+  _auto_gpu_count=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || echo 1)
+fi
+if [[ "${_auto_gpu_count}" -ge 4 ]]; then
+  _default_ds_config="${COIN_REPO_ROOT}/scripts/zero3.json"
+else
+  _default_ds_config="${COIN_REPO_ROOT}/scripts/zero3_offload.json"
+fi
+COIN_DS_CONFIG="${COIN_DS_CONFIG:-${_default_ds_config}}"
+unset _auto_gpu_count _default_ds_config _cvd
 COIN_BASE_MODEL="${COIN_BASE_MODEL:-${DEFAULT_BASE_MODEL}}"
 COIN_VISION_TOWER="${COIN_VISION_TOWER:-${DEFAULT_VISION_TOWER}}"
 COIN_PRETRAIN_PROJECTOR="${COIN_PRETRAIN_PROJECTOR:-${DEFAULT_PRETRAIN_PROJECTOR}}"

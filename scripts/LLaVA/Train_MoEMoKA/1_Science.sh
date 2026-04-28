@@ -18,7 +18,7 @@ require_path "${DATA_PATH}" "ScienceQA train json"
 ${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
     --deepspeed "${COIN_DS_CONFIG:-./scripts/zero3.json}" \
     --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
-    --expert_num 4 \
+    --expert_num 8 \
     --model_name_or_path "${COIN_BASE_MODEL}" \
     --pretrain_mm_mlp_adapter "${COIN_PRETRAIN_PROJECTOR}" \
     --version $PROMPT_VERSION \

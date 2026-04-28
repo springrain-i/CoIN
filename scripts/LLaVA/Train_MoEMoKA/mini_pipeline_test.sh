@@ -88,7 +88,7 @@ for i in "${!TASK_NAMES[@]}"; do
         --lora_r 32 \
         --lora_alpha 64 \
         --mm_projector_lr 2e-5 \
-        --expert_num 4 \
+        --expert_num 8 \
         --model_name_or_path "${COIN_BASE_MODEL}" \
         --pretrain_mm_mlp_adapter "${COIN_PRETRAIN_PROJECTOR}" \
         --version "${PROMPT_VERSION}" \
