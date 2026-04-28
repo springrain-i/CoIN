@@ -1,21 +1,26 @@
 # -*- encoding: utf-8 -*-
 # MoE-MoKA: Mixture-of-Experts Multimodal Low-Rank Adaptation
 #
-# Extends MoKA (modality-specific A matrices, shared B, cross-attention) with
-# N experts and per-token soft routing. Design:
+# Each expert is a complete MoKA unit: (A_text_i, A_vis_i, B_i) with an
+# intra-expert cross-attention. Soft routing weights each expert's full output.
 #
-#   ΔW·x = B · Σᵢ wᵢ · [A_text_i·x_text ; A_vis_i·x_vis + CrossAttn(vis, text)]
+# Design (following CoIN MoE-LoRA rank-split convention):
+#   r_per = r // expert_num  (each expert gets equal slice of rank budget)
 #
-# - N experts, each holding (A_text_i, A_vis_i) pair mapped to rank-r space.
-# - One shared B (r → d_out) per adapter, ensuring cross-modal alignment.
-# - Per-token softmax router: wᵢ(x) = softmax(W_router · x)
-# - Cross-attention at rank-r cost: visual tokens attend to text tokens.
-# - Token routing uses CoIN token_mask convention: 2=text, 1=visual, 0=pad.
+#   expert_i forward:
+#     a_text = A_text_i · x_text                      (n_text, r_per)
+#     a_vis  = A_vis_i  · x_vis                       (n_vis,  r_per)
+#     a_vis += CrossAttn(query=a_vis, key=a_text, val=a_text)
+#     a_combined[text] = a_text,  a_combined[vis] = a_vis
+#     out_i  = B_i · a_combined                       (B, S, d_out)
+#
+#   final: ΔW·x = Σᵢ wᵢ · out_i · scaling
+#
+# Token mask convention (CoIN): 2=text, 1=visual, 0=pad.
 
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -52,12 +57,13 @@ class MoEMoKALoraConfig(LoraConfig):
     """
     Configuration for MoE-MoKA LoRA.
 
-    Adds expert_num on top of standard LoRA config. Each expert holds a
-    (A_text, A_vis) pair; all experts share one B matrix.
+    Each expert is a full MoKA unit (A_text, A_vis, B) with intra-expert
+    cross-attention. rank r is split evenly across expert_num experts, so
+    r must be divisible by expert_num.
     """
     expert_num: int = field(
         default=4,
-        metadata={"help": "Number of MoE experts."},
+        metadata={"help": "Number of MoE experts. r must be divisible by expert_num."},
     )
 
     def __post_init__(self):
@@ -65,29 +71,23 @@ class MoEMoKALoraConfig(LoraConfig):
 
 
 # ---------------------------------------------------------------------------
-# Expert and scalar helper
+# Per-expert MoKA unit
 # ---------------------------------------------------------------------------
 
-class _LearnableScalar(nn.Module):
-    """Wraps a single learnable scalar.  Name contains 'lora_' so the
-    standard mark_only_lora_as_trainable keeps it unfrozen."""
-
-    def __init__(self, init_val: float = 0.1):
-        super().__init__()
-        self.lora_value = nn.Parameter(torch.tensor(init_val))
-
-    def get(self) -> torch.Tensor:
-        return self.lora_value
-
-
 class MoEMoKAExpert(nn.Module):
-    """Single expert: one A matrix per modality (text / visual)."""
+    """
+    One MoKA expert: independent A_text, A_vis, and B.
+    All three operate on per-expert rank r_per = r // expert_num.
 
-    def __init__(self, in_features: int, r: int):
+    Attribute names start with 'lora_' so mark_only_lora_as_trainable keeps
+    them unfrozen.
+    """
+
+    def __init__(self, in_features: int, out_features: int, r_per: int):
         super().__init__()
-        # Attribute names start with 'lora_' to survive the trainable-param filter.
-        self.lora_A_text = nn.Linear(in_features, r, bias=False)
-        self.lora_A_vis = nn.Linear(in_features, r, bias=False)
+        self.lora_A_text = nn.Linear(in_features, r_per, bias=False)
+        self.lora_A_vis  = nn.Linear(in_features, r_per, bias=False)
+        self.lora_B      = nn.Linear(r_per, out_features, bias=False)
 
 
 # ---------------------------------------------------------------------------
@@ -98,22 +98,17 @@ class MoEMoKALoraLayer(LoraLayer):
     """
     LoRA layer mixin for MoE-MoKA.
 
-    Inherits r, scaling, lora_dropout, and token_mask / lora_mode infrastructure
-    from LoraLayer. Adds MoE-specific storage for experts, shared B, router,
-    and the cross-attention weight.
+    Stores per-adapter expert lists and the soft router.  Inherits token_mask
+    and lora_mode infrastructure from LoraLayer.
     """
 
     def __init__(self, in_features: int, out_features: int, expert_num: int):
         super().__init__(in_features, out_features)
         self.expert_num = expert_num
-        # Adapter-name → ModuleList[MoEMoKAExpert]
+        # adapter_name → ModuleList[MoEMoKAExpert]
         self.lora_experts = nn.ModuleDict({})
-        # Adapter-name → nn.Linear(r, out_features)  — shared B
-        self.lora_B_shared = nn.ModuleDict({})
-        # Adapter-name → nn.Linear(in_features, expert_num)
-        self.lora_router = nn.ModuleDict({})
-        # Adapter-name → _LearnableScalar  (cross-attention weight)
-        self.lora_attn = nn.ModuleDict({})
+        # adapter_name → nn.Linear(in_features, expert_num)  (soft router)
+        self.lora_router  = nn.ModuleDict({})
 
     def update_layer(
         self,
@@ -123,6 +118,12 @@ class MoEMoKALoraLayer(LoraLayer):
         lora_dropout: float,
         init_lora_weights: bool,
     ):
+        if r % self.expert_num != 0:
+            raise ValueError(
+                f"MoE-MoKA requires r ({r}) to be divisible by expert_num ({self.expert_num})."
+            )
+        r_per = r // self.expert_num
+
         self.r[adapter_name] = r
         self.lora_alpha[adapter_name] = lora_alpha
         self.scaling[adapter_name] = lora_alpha / r
@@ -131,19 +132,14 @@ class MoEMoKALoraLayer(LoraLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: drop}))
 
         experts = nn.ModuleList(
-            [MoEMoKAExpert(self.in_features, r) for _ in range(self.expert_num)]
+            [MoEMoKAExpert(self.in_features, self.out_features, r_per)
+             for _ in range(self.expert_num)]
         )
         self.lora_experts.update(nn.ModuleDict({adapter_name: experts}))
-        self.lora_B_shared.update(
-            nn.ModuleDict({adapter_name: nn.Linear(r, self.out_features, bias=False)})
-        )
         self.lora_router.update(
             nn.ModuleDict(
                 {adapter_name: nn.Linear(self.in_features, self.expert_num, bias=False)}
             )
-        )
-        self.lora_attn.update(
-            nn.ModuleDict({adapter_name: _LearnableScalar(0.1)})
         )
 
         if init_lora_weights:
@@ -156,10 +152,8 @@ class MoEMoKALoraLayer(LoraLayer):
             return
         for expert in self.lora_experts[adapter_name]:
             nn.init.kaiming_uniform_(expert.lora_A_text.weight, a=math.sqrt(5))
-            nn.init.kaiming_uniform_(expert.lora_A_vis.weight, a=math.sqrt(5))
-        # B=0 so ΔW=0 at initialisation, identical to standard LoRA.
-        nn.init.zeros_(self.lora_B_shared[adapter_name].weight)
-        # Small router init → near-uniform distribution at start.
+            nn.init.kaiming_uniform_(expert.lora_A_vis.weight,  a=math.sqrt(5))
+            nn.init.zeros_(expert.lora_B.weight)          # ΔW=0 at init
         nn.init.normal_(self.lora_router[adapter_name].weight, std=0.01)
 
 
@@ -171,14 +165,17 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
     """
     Drop-in replacement for nn.Linear with MoE-MoKA adaptation.
 
-    Forward pass overview:
-      1. Base linear: result = W₀x
-      2. Router:      w = softmax(W_r · x)          — shape (B, S, N)
-      3. Per expert:  a_i[text] = A_text_i(x[text])
-                      a_i[vis]  = A_vis_i(x[vis])
-                      a_i[vis] += attn_w · CrossAttn(a_i[vis], a_i[text])
-      4. Aggregate:   combined  = Σ_i w_i · a_i     — shape (B, S, r)
-      5. Output:      result   += B(combined) * scaling
+    Forward overview:
+      1. Base linear:  result  = W₀ · x
+      2. Router:       w       = softmax(W_r · x)        (B, S, N)
+      3. Per expert i:
+           a_text  = A_text_i(x_text)                   (n_text, r_per)
+           a_vis   = A_vis_i(x_vis)                     (n_vis,  r_per)
+           a_vis  += CrossAttn(a_vis, a_text, a_text)   intra-expert
+           a_comb  = [a_text at text positions ;
+                      a_vis  at vis  positions]          (B, S, r_per)
+           out_i   = B_i · a_comb                       (B, S, d_out)
+      4. Aggregate: result += Σᵢ wᵢ · out_i · scaling
     """
 
     def __init__(
@@ -207,7 +204,6 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
         self.active_adapter = adapter_name
 
-    # merge / unmerge are no-ops (cross-modal architecture is not trivially mergeable)
     def merge(self):
         warnings.warn("MoE-MoKA does not support weight merging.")
 
@@ -217,7 +213,6 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         previous_dtype = x.dtype
 
-        # Always compute the base linear result.
         result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), self.bias)
 
         adapter = self.active_adapter
@@ -228,111 +223,117 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
         ):
             return result.to(previous_dtype)
 
-        r = self.r[adapter]
         scaling = self.scaling[adapter]
-
-        # Cast to the training dtype used by the adapter weights.
         x = x.to(self.lora_experts[adapter][0].lora_A_text.weight.dtype)
         B, S, d_in = x.shape
 
         # --- Resolve modality masks -------------------------------------------
         token_mask = getattr(self, "token_mask", None)
-        lora_mode = getattr(self, "lora_mode", "all")
+        lora_mode  = getattr(self, "lora_mode", "all")
 
         if token_mask is not None:
-            # During autoregressive generation with KV cache, x has shape (B, 1, d)
-            # while token_mask retains the full prompt length.  Coerce to match.
             if token_mask.shape[1] != S:
                 token_mask = token_mask[:, -S:] if S <= token_mask.shape[1] else None
             if token_mask is not None:
-                text_mask = token_mask == 2  # (B, S)
-                vis_mask = token_mask == 1
+                text_mask = (token_mask == 2)   # (B, S)
+                vis_mask  = (token_mask == 1)
             else:
                 text_mask = torch.ones(B, S, dtype=torch.bool, device=x.device)
-                vis_mask = torch.zeros(B, S, dtype=torch.bool, device=x.device)
+                vis_mask  = torch.zeros(B, S, dtype=torch.bool, device=x.device)
         else:
-            # No mask: treat every non-padding position as text.
             text_mask = torch.ones(B, S, dtype=torch.bool, device=x.device)
-            vis_mask = torch.zeros(B, S, dtype=torch.bool, device=x.device)
+            vis_mask  = torch.zeros(B, S, dtype=torch.bool, device=x.device)
 
-        # Partial modality eval: disable one modality path.
         if lora_mode == "text":
-            vis_mask = torch.zeros_like(vis_mask)
+            vis_mask  = torch.zeros_like(vis_mask)
         elif lora_mode == "vision":
             text_mask = torch.zeros_like(text_mask)
 
         has_text = bool(text_mask.any())
-        has_vis = bool(vis_mask.any())
+        has_vis  = bool(vis_mask.any())
 
-        # --- Router: per-token soft weights over N experts --------------------
+        # --- Router: per-token soft weights (B, S, N) -------------------------
         dropped_x = self.lora_dropout[adapter](x)
-        # router_weights: (B, S, N)
-        router_weights = F.softmax(self.lora_router[adapter](dropped_x), dim=-1)
+        router_weights = F.softmax(
+            self.lora_router[adapter](dropped_x), dim=-1
+        )   # (B, S, N)
 
-        # --- Accumulate expert contributions ---------------------------------
-        combined = torch.zeros(B, S, r, device=x.device, dtype=x.dtype)
-        attn_w = self.lora_attn[adapter].get()
+        # --- Per-expert contribution ------------------------------------------
+        # Accumulate weighted expert outputs directly in d_out space.
+        expert_sum = torch.zeros(B, S, self.out_features, device=x.device, dtype=x.dtype)
+
+        flat_text = dropped_x[text_mask]   # (n_text, d_in)  may be empty
+        flat_vis  = dropped_x[vis_mask]    # (n_vis,  d_in)  may be empty
 
         for i, expert in enumerate(self.lora_experts[adapter]):
-            a_out = torch.zeros(B, S, r, device=x.device, dtype=x.dtype)
+            r_per = expert.lora_A_text.out_features
 
-            # Always call both A matrices so ZeRO-3 traces a consistent module
-            # call order every step.  Pass an empty slice when the modality is
-            # absent; the result is discarded via the mask assignment below.
-            flat_text = dropped_x[text_mask]  # (n_text, d_in)  — may be empty
-            flat_vis = dropped_x[vis_mask]    # (n_vis,  d_in)  — may be empty
-            out_text = expert.lora_A_text(flat_text)
-            out_vis = expert.lora_A_vis(flat_vis)
+            # Always call both A matrices for consistent ZeRO-3 trace.
+            out_text = expert.lora_A_text(flat_text)   # (n_text, r_per)
+            out_vis  = expert.lora_A_vis(flat_vis)     # (n_vis,  r_per)
 
+            # Reconstruct full sequence in rank-r_per space.
+            a_comb = torch.zeros(B, S, r_per, device=x.device, dtype=x.dtype)
             if has_text:
-                a_out[text_mask] = out_text
+                a_comb[text_mask] = out_text
             if has_vis:
-                a_out[vis_mask] = out_vis
+                # Intra-expert cross-attention before writing back.
+                if has_text:
+                    out_vis = self._cross_attention(
+                        out_vis, out_text, text_mask, vis_mask, B
+                    )
+                a_comb[vis_mask] = out_vis
 
-            # Cross-attention: visual tokens (query) attend to text tokens (k/v).
-            # Operates in the cheap rank-r space; no extra projection matrices.
-            if has_text and has_vis:
-                a_out = self._cross_attention(a_out, text_mask, vis_mask, B, attn_w)
+            # Per-expert B projects r_per → d_out.
+            out_i = expert.lora_B(a_comb)   # (B, S, d_out)
 
-            # Weighted accumulation: w_i is (B, S), broadcast over r-dim.
-            combined = combined + router_weights[:, :, i].unsqueeze(-1) * a_out
+            # Weighted sum: router_weights[:, :, i] is (B, S).
+            expert_sum = expert_sum + router_weights[:, :, i].unsqueeze(-1) * out_i
 
-        # --- Shared B ---------------------------------------------------------
-        result = result + self.lora_B_shared[adapter](combined) * scaling
-
+        result = result + expert_sum * scaling
         return result.to(previous_dtype)
 
+    @staticmethod
     def _cross_attention(
-        self,
-        a_out: torch.Tensor,
-        text_mask: torch.Tensor,
-        vis_mask: torch.Tensor,
+        query: torch.Tensor,       # (n_vis,  r_per)  — visual tokens after A_vis
+        key_val: torch.Tensor,     # (n_text, r_per)  — text   tokens after A_text
+        text_mask: torch.Tensor,   # (B, S) bool
+        vis_mask: torch.Tensor,    # (B, S) bool
         batch_size: int,
-        attn_w: torch.Tensor,
     ) -> torch.Tensor:
         """
-        For each sample: visual token representations (after A_vis) attend to
-        text token representations (after A_text) as query→(key, value).
-        All computation is in rank-r space, so it is cheap even for long seqs.
+        Intra-expert cross-attention: visual tokens attend to text tokens.
+        Operates in rank-r_per space; no extra projection matrices.
+        Returns updated visual representations with the same shape as query.
         """
+        # We need per-sample indices because each sample may have a different
+        # number of text / visual tokens.
+        out = query.clone()
+        vis_offset = 0
+        text_offset = 0
         for b in range(batch_size):
-            text_idx = torch.where(text_mask[b])[0]
-            vis_idx = torch.where(vis_mask[b])[0]
-            if len(text_idx) == 0 or len(vis_idx) == 0:
+            n_text = int(text_mask[b].sum())
+            n_vis  = int(vis_mask[b].sum())
+            if n_text == 0 or n_vis == 0:
+                vis_offset  += n_vis
+                text_offset += n_text
                 continue
 
-            query = a_out[b, vis_idx, :].unsqueeze(0)   # (1, n_vis,  r)
-            key = a_out[b, text_idx, :].unsqueeze(0)     # (1, n_text, r)
-            value = key
+            q = query  [vis_offset:  vis_offset  + n_vis ].unsqueeze(0)  # (1, n_vis,  r_per)
+            k = key_val[text_offset: text_offset + n_text].unsqueeze(0)  # (1, n_text, r_per)
+            v = k
 
-            d_k = query.shape[-1]
-            score = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+            d_k = q.shape[-1]
+            score     = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
             attn_probs = F.softmax(score, dim=-1)
-            attn_out = torch.matmul(attn_probs, value).squeeze(0)  # (n_vis, r)
+            attn_out  = torch.matmul(attn_probs, v).squeeze(0)            # (n_vis, r_per)
 
-            a_out[b, vis_idx, :] = a_out[b, vis_idx, :] + attn_w * attn_out
+            out[vis_offset: vis_offset + n_vis] = query[vis_offset: vis_offset + n_vis] + attn_out
 
-        return a_out
+            vis_offset  += n_vis
+            text_offset += n_text
+
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +343,6 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
 class MoEMoKALoraModel(LoraModel):
     """
     Replaces target Linear modules with MoEMoKALoraLinear.
-    Identical orchestration to CoINMOELoraModel; only _create_new_module differs.
     """
 
     def __init__(self, model, config, adapter_name):
@@ -384,7 +384,6 @@ class MoEMoKALoraModel(LoraModel):
             parent, target, target_name = _get_submodules(self.model, key)
 
             if isinstance(target, LoraLayer):
-                # Already wrapped — update in place (multi-adapter scenario).
                 target.update_layer(
                     adapter_name,
                     lora_config.r,
