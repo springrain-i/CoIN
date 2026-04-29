@@ -84,7 +84,12 @@ parser.add_argument('--grounding',      action="store_true",        help = "True
 parser.add_argument('--objectFeatures', action="store_true",        help = "True for object-based attention (False for spatial).")
 parser.add_argument('--mapSize',    default = 7,    type = int, help = "Optional, only to get attention score. Images features map size, mapSize * mapSize")
 parser.add_argument('--output-dir', type=str)
+parser.add_argument('--questions-dir', type=str, default=None,
+                    help="Directory containing GQA question JSON files. "
+                         "Defaults to the same directory as --path.")
 args = parser.parse_args()
+if args.questions_dir is None:
+    args.questions_dir = args.path
 
 print("Please make sure to use our provided visual features as gqadataset.org for better comparability. We provide both spatial and object-based features trained on GQA train set.") 
 print("In particular please avoid using features from https://github.com/peteanderson80/bottom-up-attention since they were trained on images contained in the GQA validation set and thus may give false scores improvement.\n")
@@ -123,7 +128,7 @@ def loadFile(name):
 
 # Load questions
 print("Loading questions...")
-questions = loadFile(os.path.join('/data4/wxl/MoBLoRA-backup/CoIN/cl_dataset/GQA',args.questions.format(tier = args.tier)))
+questions = loadFile(os.path.join(args.questions_dir, args.questions.format(tier = args.tier)))
 
 # # Load choices
 # print("Loading choices...")

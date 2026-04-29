@@ -36,6 +36,7 @@ python -m ETrain.Eval.LLaVA.CoIN.convert_gqa_for_eval \
 python -m ETrain.Eval.LLaVA.CoIN.eval_gqa \
     --tier testdev_balanced \
     --path "${RESULT_DIR}/${STAGE}" \
+    --questions-dir "${IMAGE_ROOT}/GQA" \
     --output-dir "${RESULT_DIR}/${STAGE}"
 
 echo "[eval][GQA] mode=${LORA_MODE} stage=${STAGE} -> ${RESULT_DIR}/${STAGE}"

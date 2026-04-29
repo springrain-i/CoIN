@@ -115,7 +115,7 @@ def eval_model(args):
 
         with torch.inference_mode():
             output_ids = model.generate(
-                input_ids,
+                input_ids=input_ids,
                 images=image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True),
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--merge-lora", type=str2bool, default=True)
     parser.add_argument(
         "--lora-mode",

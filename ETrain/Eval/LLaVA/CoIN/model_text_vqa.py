@@ -97,7 +97,13 @@ def eval_model(args):
     lora_total = 0
     lora_active = 0
     for module in model.modules():
-        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+        if hasattr(module, "lora_experts"):
+            lora_total += 1
+            active = getattr(module, "active_adapter", None)
+            if active is not None and active in getattr(module, "lora_experts", {}):
+                if getattr(module, "r", {}).get(active, 0) > 0:
+                    lora_active += 1
+        elif hasattr(module, "lora_A") and hasattr(module, "lora_B"):
             lora_total += 1
             active = getattr(module, "active_adapter", None)
             if active is not None and active in getattr(module, "lora_A", {}):
@@ -188,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--merge-lora", type=str2bool, default=True)
     parser.add_argument(
         "--lora-mode",

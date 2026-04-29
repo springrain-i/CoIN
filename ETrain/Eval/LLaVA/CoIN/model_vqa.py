@@ -52,7 +52,13 @@ def eval_model(args):
     lora_total = 0
     lora_active = 0
     for module in model.modules():
-        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+        if hasattr(module, "lora_experts"):
+            lora_total += 1
+            active = getattr(module, "active_adapter", None)
+            if active is not None and active in getattr(module, "lora_experts", {}):
+                if getattr(module, "r", {}).get(active, 0) > 0:
+                    lora_active += 1
+        elif hasattr(module, "lora_A") and hasattr(module, "lora_B"):
             lora_total += 1
             active = getattr(module, "active_adapter", None)
             if active is not None and active in getattr(module, "lora_A", {}):
