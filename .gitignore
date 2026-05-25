@@ -39,3 +39,9 @@ ckpts*
 
 # Demo
 serve_images/
+
+# Claude Code
+.claude/logs/
+
+# Experiment logs
+logs/

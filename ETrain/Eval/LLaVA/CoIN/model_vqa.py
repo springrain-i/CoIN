@@ -34,7 +34,34 @@ def str2bool(v):
     if v.lower() in ("no", "false", "f", "0", "n"):
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
-    
+
+
+def load_checkpoint_cache(answers_dir):
+    """
+    从 answers_dir/checkpoints.jsonl 中加载已推理的结果。
+    返回 dict: {question_id -> record_dict}，若文件不存在则返回空 dict。
+    """
+    checkpoint_path = os.path.join(answers_dir, "checkpoints.jsonl")
+    cache = {}
+    if not os.path.exists(checkpoint_path):
+        return cache, checkpoint_path
+
+    with open(checkpoint_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                qid = record["question_id"]
+                cache[qid] = record
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+    print(f"[Resume] Loaded {len(cache)} cached records from {checkpoint_path}")
+    return cache, checkpoint_path
+
+
 def eval_model(args):
     # Model
     disable_torch_init()
@@ -63,17 +90,33 @@ def eval_model(args):
     with open(os.path.expanduser(args.question_file), "r") as f:
         questions = json.load(f)
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
-    
+
     answers_file = os.path.expanduser(args.answers_file)
-    os.makedirs(os.path.dirname(answers_file), exist_ok=True)
+    answers_dir = os.path.dirname(answers_file)
+    os.makedirs(answers_dir, exist_ok=True)
+
+    # ── 断点续推：加载 checkpoints.jsonl ──────────────────────────────────
+    checkpoint_cache, checkpoint_path = load_checkpoint_cache(answers_dir)
+    # ─────────────────────────────────────────────────────────────────────
+
     ans_file = open(answers_file, "w")
     count = 0 
+    hit = 0
     for line in tqdm(questions):
         count += 1
         idx = line["question_id"]
         image_file = line["image"]
         qs = line["text"]
         cur_prompt = qs
+
+        # ── 命中缓存：直接写入结果，跳过推理 ────────────────────────────
+        if idx in checkpoint_cache:
+            ans_file.write(json.dumps(checkpoint_cache[idx]) + "\n")
+            ans_file.flush()
+            hit += 1
+            continue
+        # ─────────────────────────────────────────────────────────────────
+
         if model.config.mm_use_im_start_end:
             qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
         else:
@@ -102,7 +145,7 @@ def eval_model(args):
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 # no_repeat_ngram_size=3,
-                max_new_tokens=1024,
+                max_new_tokens=args.max_new_tokens,
                 use_cache=True)
 
         input_token_len = input_ids.shape[1]
@@ -124,6 +167,9 @@ def eval_model(args):
                                    "metadata": {}}) + "\n")
         ans_file.flush()
     ans_file.close()
+
+    if checkpoint_cache:
+        print(f"[Resume] {hit}/{count} samples loaded from cache, {count - hit} newly inferred.")
 
     lora_stats = None
     candidates = [
@@ -161,6 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--merge-lora", type=str2bool, default=True)
     parser.add_argument(
         "--lora-mode",

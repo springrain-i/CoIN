@@ -26,7 +26,7 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+export CUDA_VISIBLE_DEVICES=0,1,2,5,6,7
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
@@ -49,6 +49,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
+        --max_new_tokens 40 \
         --conv-mode vicuna_v1 &
 done
 # 三个选项: all, text, vision

@@ -125,7 +125,8 @@ run_eval_once() {
 
   require_path "$model_path" "trained checkpoint for T${train_task}"
 
-  bash "$eval_script" "$stage" "$model_path" "$mode"
+  local eval_log="${LOG_ROOT}/eval_${phase}_trainT${train_task}_evalT${eval_task}_${mode}_${TIMESTAMP}.log"
+  bash "$eval_script" "$stage" "$model_path" "$mode" 2>&1 | tee "$eval_log"
   local acc
   acc=$(python "$PARSE_ACC_PY" --stage-dir "$stage_dir")
   echo "${phase},${mode},${train_task},${eval_task},${acc},${stage_dir}" >> "$out_csv"
@@ -151,48 +152,63 @@ validate_modes() {
 
 validate_modes
 
-for i in $(seq "$START_TASK" "$END_TASK"); do
-  script="${TASK_SCRIPTS[$((i-1))]}"
-  task_name="${TASK_NAMES[$((i-1))]}"
-  task_log="${LOG_ROOT}/${task_name}_${TIMESTAMP}.log"
-  echo "[CoIN] >>> Training task T${i} (${task_name}) via ${script}"
-  echo "[CoIN] Task log: ${task_log}"
+# for i in $(seq "$START_TASK" "$END_TASK"); do
+#   script="${TASK_SCRIPTS[$((i-1))]}"
+#   task_name="${TASK_NAMES[$((i-1))]}"
+#   task_log="${LOG_ROOT}/${task_name}_${TIMESTAMP}.log"
+#   echo "[CoIN] >>> Training task T${i} (${task_name}) via ${script}"
+#   echo "[CoIN] Task log: ${task_log}"
 
-  if [[ "$DRY_RUN" == "1" ]]; then
-    if [[ "$ENABLE_EVAL" == "1" ]]; then
-      for mode in $MODES; do
-        for eval_task in $(seq 1 "$i"); do
-          run_eval_once "online" "$i" "$eval_task" "$mode"
-        done
-      done
-    fi
-    continue
-  fi
+#   if [[ "$DRY_RUN" == "1" ]]; then
+#     # if [[ "$ENABLE_EVAL" == "1" ]]; then
+#     #   for mode in $MODES; do
+#     #     for eval_task in $(seq 1 "$i"); do
+#     #       run_eval_once "online" "$i" "$eval_task" "$mode"
+#     #     done
+#     #   done
+#     # fi
+#     continue
+#   fi
 
-  bash "$script" 2>&1 | tee "$task_log"
-  echo "[CoIN] <<< Finished T${i} (${task_name})"
-  echo "[CoIN] Log saved to: ${task_log}"
+#   bash "$script" 2>&1 | tee "$task_log"
+#   echo "[CoIN] <<< Finished T${i} (${task_name})"
+#   echo "[CoIN] Log saved to: ${task_log}"
 
-  if [[ "$ENABLE_EVAL" == "1" ]]; then
-    for mode in $MODES; do
-      for eval_task in $(seq 1 "$i"); do
-        run_eval_once "online" "$i" "$eval_task" "$mode"
-      done
-    done
-  fi
-done
+#   # if [[ "$ENABLE_EVAL" == "1" ]]; then
+#   #   for mode in $MODES; do
+#   #     for eval_task in $(seq 1 "$i"); do
+#   #       run_eval_once "online" "$i" "$eval_task" "$mode"
+#   #     done
+#   #   done
+#   # fi
+# done
 
+# if [[ "$ENABLE_EVAL" == "1" ]]; then
+#   echo "[CoIN] >>> Final full eval after continual sequence"
+#   final_train_task="$END_TASK"
+#   for mode in $MODES; do
+#     for eval_task in $(seq 1 "$END_TASK"); do
+#       run_eval_once "final" "$final_train_task" "$eval_task" "$mode"
+#     done
+#   done
+#   echo "[CoIN] <<< Final full eval complete"
+#   echo "[CoIN] Online eval metrics -> ${ONLINE_OUT_CSV}"
+#   echo "[CoIN] Final eval metrics  -> ${FINAL_OUT_CSV}"
+# fi
+
+# 3. 补跑 online eval（从断点处继续）
 if [[ "$ENABLE_EVAL" == "1" ]]; then
-  echo "[CoIN] >>> Final full eval after continual sequence"
-  final_train_task="$END_TASK"
+  # T7 online eval 续跑：eval_task=T7 从 visual 开始，然后 eval_task=T8
+  echo "[CoIN] >>> Resume T7 online eval from train=T7, eval=T7, mode=visual"
+  # train=T7, eval=T7: 只剩 visual（all/text 已完成）
+  run_eval_once "online" "7" "7" "visual"
+  # T8 online eval 全量
+  echo "[CoIN] >>> Run online eval for T8"
   for mode in $MODES; do
-    for eval_task in $(seq 1 "$END_TASK"); do
-      run_eval_once "final" "$final_train_task" "$eval_task" "$mode"
+    for eval_task in $(seq 1 8); do
+      run_eval_once "online" "8" "$eval_task" "$mode"
     done
   done
-  echo "[CoIN] <<< Final full eval complete"
-  echo "[CoIN] Online eval metrics -> ${ONLINE_OUT_CSV}"
-  echo "[CoIN] Final eval metrics  -> ${FINAL_OUT_CSV}"
 fi
 
 echo "[CoIN] Continual training sequence complete."

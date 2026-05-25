@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
+gpu_list="${CUDA_VISIBLE_DEVICES:-0,1,2,5,6,7}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
 CHUNKS=${#GPULIST[@]}
@@ -27,20 +27,25 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
+BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5'
+VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
+
 RESULT_DIR="./results/CoIN/LLaVA/VQAv2"
+mkdir -p "$RESULT_DIR/$STAGE"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_vqa \
         --model-path $MODELPATH \
-        --model-base ./checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
-        --question-file ./playground/Instructions_Original/VQAv2/val.json \
-        --image-folder ./cl_dataset \
+        --model-base $BASE_MODEL_PATH \
+        --question-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/VQAv2/val.json \
+        --image-folder /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset \
         --answers-file $RESULT_DIR/$STAGE/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
+        --max_new_tokens 50 \
         --conv-mode vicuna_v1 &
 done
 
@@ -58,10 +63,11 @@ done
 
 python -m ETrain.Eval.LLaVA.CoIN.eval_vqav2 \
     --result-file $output_file \
-    --annotation-file ./playground/Instructions_Original/VQAv2/val.json \
+    --annotation-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/VQAv2/val.json \
     --output-dir $RESULT_DIR/$STAGE \
 
 python -m ETrain.Eval.LLaVA.CoIN.create_prompt \
     --rule ./ETrain/Eval/LLaVA/CoIN/rule.json \
-    --questions ./playground/Instructions_Original/VQAv2/val.json \
+    --questions /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/VQAv2/val.json \
     --results $output_file \
+    --rule_temp CoIN \

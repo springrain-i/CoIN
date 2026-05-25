@@ -1,5 +1,6 @@
 #!/bin/bash
 
+export CUDA_VISIBLE_DEVICES=0,1,2,5,6,7
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
@@ -27,20 +28,25 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
+BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5'
+VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
+
 RESULT_DIR="./results/CoIN/LLaVA/OCRVQA"
+mkdir -p "$RESULT_DIR/$STAGE"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_ocr_vqa \
         --model-path $MODELPATH \
-        --model-base ./checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5 \
-        --question-file ./playground/Instructions_Original/OCRVQA/test.json \
-        --image-folder ./cl_dataset \
+        --model-base $BASE_MODEL_PATH \
+        --question-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/OCRVQA/test.json \
+        --image-folder /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset \
         --answers-file $RESULT_DIR/$STAGE/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
+        --max_new_tokens 150 \
         --conv-mode vicuna_v1 &
 done
 
@@ -57,11 +63,12 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
 done
 
 python -m ETrain.Eval.LLaVA.CoIN.eval_ocrvqa \
-    --annotation-file ./playground/Instructions_Original/OCRVQA/test.json \
+    --annotation-file /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/OCRVQA/test.json \
     --result-file $output_file \
     --output-dir $RESULT_DIR/$STAGE \
 
 python -m ETrain.Eval.LLaVA.CoIN.create_prompt \
     --rule ./ETrain/Eval/LLaVA/CoIN/rule.json \
-    --questions ./playground/Instructions_Original/OCRVQA/test.json \
+    --questions /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original/OCRVQA/test.json \
     --results $output_file \
+    --rule_temp CoIN \

@@ -106,7 +106,7 @@ def eval_model(args):
                 images=images,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
-                max_new_tokens=1024,
+                max_new_tokens=args.max_new_tokens,
                 use_cache=True,
                 stopping_criteria=stopping_criteria,
             )
@@ -193,6 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--merge-lora", type=str2bool, default=True)
     parser.add_argument(
         "--lora-mode",
