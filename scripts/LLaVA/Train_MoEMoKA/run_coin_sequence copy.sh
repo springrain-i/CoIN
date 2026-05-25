@@ -75,13 +75,6 @@ DRY_RUN=${DRY_RUN:-0}
 TRAINED_THROUGH=${TRAINED_THROUGH:-0}
 EVALED_THROUGH=${EVALED_THROUGH:-0}
 SKIP_MODES=${SKIP_MODES:-""}
-# Fine-grained resume within a single train task's online eval:
-#   RESUME_TRAIN_TASK=N   — which train step we're resuming inside (0 = disabled)
-#   RESUME_MODE=mode      — first mode to run (all/text/visual); modes before this are skipped
-#   RESUME_EVAL_TASK=K    — within RESUME_MODE, skip eval tasks 1..K-1; from K+1 onward run all
-RESUME_TRAIN_TASK=${RESUME_TRAIN_TASK:-0}
-RESUME_MODE=${RESUME_MODE:-""}
-RESUME_EVAL_TASK=${RESUME_EVAL_TASK:-1}
 
 METRIC_DIR="${REPO_ROOT}/results/CoIN/LLaVA/metrics"
 ONLINE_OUT_CSV="${METRIC_DIR}/continual_online_eval.csv"
@@ -143,20 +136,6 @@ run_eval_once() {
     fi
   done
 
-  # Fine-grained resume: skip evals before RESUME_TRAIN_TASK:RESUME_MODE:RESUME_EVAL_TASK
-  if [[ "$RESUME_TRAIN_TASK" -gt 0 && "$train_task" -eq "$RESUME_TRAIN_TASK" && -n "$RESUME_MODE" ]]; then
-    local this_mode_idx resume_mode_idx
-    this_mode_idx=$(_mode_order "$mode")
-    resume_mode_idx=$(_mode_order "$RESUME_MODE")
-    if [[ "$this_mode_idx" -lt "$resume_mode_idx" ]]; then
-      echo "[Eval][$phase] mode=${mode} train=T${train_task} eval=T${eval_task} -> SKIPPED (before RESUME_MODE=${RESUME_MODE})"
-      return
-    elif [[ "$this_mode_idx" -eq "$resume_mode_idx" && "$eval_task" -lt "$RESUME_EVAL_TASK" ]]; then
-      echo "[Eval][$phase] mode=${mode} train=T${train_task} eval=T${eval_task} -> SKIPPED (before RESUME_EVAL_TASK=${RESUME_EVAL_TASK})"
-      return
-    fi
-  fi
-
   echo "[Eval][$phase] mode=${mode}, train=T${train_task}, eval=T${eval_task}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -171,16 +150,6 @@ run_eval_once() {
   acc=$("${COIN_PYTHON}" "$PARSE_ACC_PY" --stage-dir "$stage_dir")
   echo "[Eval][$phase] mode=${mode} train=T${train_task} eval=T${eval_task} -> acc=${acc}"
   echo "${phase},${mode},${train_task},${eval_task},${acc},${stage_dir}" >> "$out_csv"
-}
-
-_mode_order() {
-  case "$1" in
-    all)    echo 0 ;;
-    text)   echo 1 ;;
-    visual) echo 2 ;;
-    vision) echo 3 ;;
-    *)      echo 99 ;;
-  esac
 }
 
 validate_modes() {
@@ -244,18 +213,18 @@ for i in $(seq "$START_TASK" "$END_TASK"); do
   fi
 done
 
-# if [[ "$ENABLE_EVAL" == "1" ]]; then
-#   echo "[CoIN] >>> Final full eval after continual sequence"
-#   final_train_task="$END_TASK"
-#   for mode in $MODES; do
-#     for eval_task in $(seq 1 "$END_TASK"); do
-#       run_eval_once "final" "$final_train_task" "$eval_task" "$mode"
-#     done
-#   done
-#   echo "[CoIN] <<< Final full eval complete"
-#   echo "[CoIN] Online eval metrics -> ${ONLINE_OUT_CSV}"
-#   echo "[CoIN] Final eval metrics  -> ${FINAL_OUT_CSV}"
-# fi
+if [[ "$ENABLE_EVAL" == "1" ]]; then
+  echo "[CoIN] >>> Final full eval after continual sequence"
+  final_train_task="$END_TASK"
+  for mode in $MODES; do
+    for eval_task in $(seq 1 "$END_TASK"); do
+      run_eval_once "final" "$final_train_task" "$eval_task" "$mode"
+    done
+  done
+  echo "[CoIN] <<< Final full eval complete"
+  echo "[CoIN] Online eval metrics -> ${ONLINE_OUT_CSV}"
+  echo "[CoIN] Final eval metrics  -> ${FINAL_OUT_CSV}"
+fi
 
 echo "[CoIN] Continual training sequence complete."
 echo "[CoIN] All task logs saved to: ${LOG_ROOT}/"
