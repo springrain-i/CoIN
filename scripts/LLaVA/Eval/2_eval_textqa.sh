@@ -37,6 +37,8 @@ VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-lar
 
 RESULT_DIR="./results/CoIN/LLaVA/Final_MOE_only_vision"
 
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"  # batch=4: ~2.5x speedup on 24GB GPU
+
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_text_vqa \
         --model-path $MODELPATH \
@@ -50,7 +52,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --merge-lora False \
         --lora-mode $LORA_MODE \
         --max_new_tokens 40 \
-        --conv-mode vicuna_v1 &
+        --conv-mode vicuna_v1 \
+        --batch-size "${EVAL_BATCH_SIZE}" &
 done
 # 三个选项: all, text, vision
 wait

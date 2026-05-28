@@ -63,8 +63,7 @@ run_train_bench() {
 
     COIN_GPUS="${GPUS}" \
     COIN_USE_VECTORIZED_LORA="${vectorized}" \
-    CUDA_VISIBLE_DEVICES="" \
-    deepspeed \
+    /data4/home/sqx/.conda/envs/coin/bin/deepspeed \
         --include "localhost:${GPUS}" \
         --master_port "${MASTER_PORT}" \
         ETrain/Train/LLaVA/train_mem.py \
