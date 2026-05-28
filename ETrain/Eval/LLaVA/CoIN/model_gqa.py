@@ -71,11 +71,33 @@ class CustomDataset(Dataset):
         return len(self.questions)
 
 
+def collate_fn_left_pad(batch):
+    """Left-pad input_ids to same length; stack image tensors."""
+    input_ids_list, image_tensors = zip(*batch)
+    pad_id = 0  # will be overridden by caller if needed; DataLoader passes raw ids
+    max_len = max(ids.shape[0] for ids in input_ids_list)
+    padded, masks = [], []
+    for ids in input_ids_list:
+        pl = max_len - ids.shape[0]
+        if pl > 0:
+            ids = torch.cat([torch.full((pl,), pad_id, dtype=ids.dtype), ids])
+            mask = torch.cat([torch.zeros(pl, dtype=torch.long), torch.ones(max_len - pl, dtype=torch.long)])
+        else:
+            mask = torch.ones(max_len, dtype=torch.long)
+        padded.append(ids)
+        masks.append(mask)
+    return torch.stack(padded), torch.stack(image_tensors), torch.stack(masks)
+
+
 # DataLoader
-def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, batch_size=1, num_workers=4):
-    assert batch_size == 1, "batch_size must be 1"
+def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config,
+                       batch_size=1, num_workers=4):
     dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config)
-    data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+    if batch_size == 1:
+        data_loader = DataLoader(dataset, batch_size=1, num_workers=num_workers, shuffle=False)
+    else:
+        data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
+                                 shuffle=False, collate_fn=collate_fn_left_pad)
     return data_loader
 
 
@@ -115,18 +137,39 @@ def eval_model(args):
         args.conv_mode = args.conv_mode + '_mmtag'
         print(f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
-    data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
+    batch_size = args.batch_size
+    if batch_size > 1:
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    for (input_ids, image_tensor), line in tqdm(zip(data_loader, questions), total=len(questions)):
-        idx = line["question_id"]
-        cur_prompt = line["text"]
+    data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor,
+                                     model.config, batch_size=batch_size)
+
+    q_iter = iter(questions)
+    for batch in tqdm(data_loader, total=math.ceil(len(questions) / batch_size)):
+        if batch_size == 1:
+            input_ids, image_tensor = batch
+            attention_mask = None
+            batch_lines = [next(q_iter)]
+        else:
+            input_ids, image_tensor, attention_mask = batch
+            batch_lines = [next(q_iter) for _ in range(input_ids.shape[0])]
+
+        # Fix pad_id in left-padded input (collate used 0, set to actual pad_token_id)
+        if attention_mask is not None and tokenizer.pad_token_id is not None and tokenizer.pad_token_id != 0:
+            input_ids[attention_mask == 0] = tokenizer.pad_token_id
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
+        images = image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device='cuda', non_blocking=True)
 
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids=input_ids,
-                images=image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True),
+                attention_mask=attention_mask,
+                images=images,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -135,20 +178,19 @@ def eval_model(args):
                 use_cache=True)
 
         input_token_len = input_ids.shape[1]
-        n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
-        if n_diff_input_output > 0:
-            print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
-        outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
-        outputs = outputs.strip()
-
-        ans_id = shortuuid.uuid()
-        ans_file.write(json.dumps({"question_id": idx,
-                                   "prompt": cur_prompt,
-                                   "text": outputs,
-                                   "answer_id": ans_id,
-                                   "model_id": model_name,
-                                   "metadata": {}}) + "\n")
-        # ans_file.flush()
+        for i, line in enumerate(batch_lines):
+            idx = line["question_id"]
+            cur_prompt = line["text"]
+            n_diff = (input_ids[i] != output_ids[i, :input_token_len]).sum().item()
+            if n_diff > 0:
+                print(f'[Warning] {n_diff} output_ids differ for question {idx}')
+            text = tokenizer.decode(output_ids[i, input_token_len:], skip_special_tokens=True).strip()
+            ans_file.write(json.dumps({"question_id": idx,
+                                       "prompt": cur_prompt,
+                                       "text": text,
+                                       "answer_id": shortuuid.uuid(),
+                                       "model_id": model_name,
+                                       "metadata": {}}) + "\n")
     ans_file.close()
 
     lora_stats = None
@@ -195,6 +237,8 @@ if __name__ == "__main__":
         default="all",
         choices=["all", "text", "vision"],
     )  # three options: all, text, vision
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Samples per forward pass. >1 enables batched inference.")
     args = parser.parse_args()
 
     eval_model(args)
