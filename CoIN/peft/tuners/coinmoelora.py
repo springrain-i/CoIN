@@ -330,6 +330,9 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         nn.Linear.reset_parameters(self)
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
         self.active_adapter = adapter_name
+        # Controlled by env var COIN_USE_VECTORIZED_LORA (default: enabled)
+        import os as _os
+        self.use_vectorized_lora = _os.environ.get("COIN_USE_VECTORIZED_LORA", "1") != "0"
 
 
     def merge(self):
@@ -370,6 +373,29 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             #     )
             self.merged = False
 
+    def _lora_vectorized(self, lora_x: torch.Tensor, router: torch.Tensor, active: str) -> torch.Tensor:
+        """Vectorized MoE-LoRA: replaces N sequential matmul pairs with 2 batched einsum ops.
+
+        lora_x: (B, T, d_in)
+        router:  (B, T, N)   after softmax
+        returns: (B, T, d_out)
+        """
+        loraA_modules = self.lora_A[active].loraA
+        loraB_modules = self.lora_B[active].loraB
+
+        # Stack A weights: (N, r_per, d_in)
+        A = torch.stack([m.mlp.weight for m in loraA_modules], dim=0)
+        # (B, T, d_in) x (N, r_per, d_in)^T  →  (B, T, N, r_per)
+        out_A = torch.einsum('bti,nri->btnr', lora_x, A)
+
+        # Stack B weights: (N, d_out, r_per)
+        B = torch.stack([m.mlp.weight for m in loraB_modules], dim=0)
+        # (B, T, N, r_per) x (N, d_out, r_per)^T  →  (B, T, N, d_out)
+        out_B = torch.einsum('btnr,nor->btno', out_A, B)
+
+        # Weighted sum over N experts: (B, T, N, d_out) * (B, T, N, 1) → (B, T, d_out)
+        return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
+
     def forward(self, x: torch.Tensor, **kwargs):
         previous_dtype = x.dtype
 
@@ -382,20 +408,25 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         elif self.r[self.active_adapter] > 0:   # general lora process
             result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
-            x = x.to(self.lora_A[self.active_adapter].loraA[0].weight.dtype)
+            active = self.active_adapter
+            x = x.to(self.lora_A[active].loraA[0].weight.dtype)
             lora_x, _ = self._apply_token_mask(x)
-            lora_x = self.lora_dropout[self.active_adapter](lora_x)
+            lora_x = self.lora_dropout[active](lora_x)
             self.lora_router = self.lora_router.to(lora_x.device)
-            router = self.lora_router[self.active_adapter](lora_x)
+            router = self.lora_router[active](lora_x)
             router = torch.softmax(router, dim=-1)
-            for i in range(self.expert_num):
-                result += ( # lora process
-                    self.lora_B[self.active_adapter].loraB[i](
-                        self.lora_A[self.active_adapter].loraA[i](lora_x),
+
+            if getattr(self, 'use_vectorized_lora', True):
+                result = result + self._lora_vectorized(lora_x, router, active)
+            else:
+                for i in range(self.expert_num):
+                    result += (
+                        self.lora_B[active].loraB[i](
+                            self.lora_A[active].loraA[i](lora_x),
+                        )
+                        * self.scaling[active]
+                        * router[:,:,i].unsqueeze(-1)
                     )
-                    * self.scaling[self.active_adapter]
-                    * router[:,:,i].unsqueeze(-1)
-                )
         else:
             result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
