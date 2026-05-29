@@ -1,0 +1,12 @@
+========================================
+SDPA Patch Benchmark
+Date: 2026年 05月 29日 星期五 16:17:45 CST
+GPU: 0, batch_size=1, samples: 300
+========================================
+BENCH_SDPA mode=baseline sdpa=0 gpu=0 n_samples=300 elapsed_ms=200668 throughput_sps=1.495
+BENCH_SDPA mode=sdpa sdpa=1 gpu=0 n_samples=300 elapsed_ms=208287 throughput_sps=1.440
+
+======== Final Summary ========
+  baseline: 1.495 sps
+  sdpa:     1.440 sps
+  speedup:  0.963x

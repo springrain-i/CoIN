@@ -1,6 +1,6 @@
 #!/bin/bash
 # Training micro-benchmark: measures training step time with/without vectorized LoRA.
-# Runs 50 steps on a tiny SciQA subset. GPUs 6,7 only.
+# Runs 50 steps on a tiny SciQA subset. All 8 GPUs (0-7), ZeRO-2.
 # Usage: bash scripts/LLaVA/bench_train_lora.sh [num_samples] [max_steps]
 #
 # Env vars:
@@ -9,6 +9,17 @@
 
 set -euo pipefail
 
+# Make coin env tools (ninja, deepspeed) available without requiring conda activate
+export PATH="/data4/home/sqx/.conda/envs/coin/bin:${PATH}"
+
+# CUDA 11.8 only supports GCC <= 11; system default is GCC 12 which breaks CPUAdam JIT.
+# Use GCC 9 which is installed at /usr/bin/gcc-9.
+export CC=/usr/bin/gcc-9
+export CXX=/usr/bin/g++-9
+export CUDA_HOME=/usr/local/cuda-11.8
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/Train_MOE/coin_paths.sh"
@@ -16,7 +27,7 @@ source "${SCRIPT_DIR}/Train_MOE/coin_paths.sh"
 NUM_SAMPLES="${1:-400}"    # samples in micro-benchmark dataset
 MAX_STEPS="${2:-50}"       # training steps to measure
 
-GPUS="6,7"
+GPUS="${BENCH_GPUS:-4,5,6,7}"
 MASTER_PORT=29611
 
 MODEL_PATH="${COIN_BASE_MODEL}"
@@ -42,12 +53,15 @@ print(f'Micro dataset: {len(subset)} samples')
 fi
 
 run_train_bench() {
-    local vectorized="${1:-1}"  # 1=vectorized, 0=loop
+    local vectorized="${1:-1}"  # 1=vectorized/compiled, 0=loop
+    local compiled="${2:-0}"    # 1=torch.compile on top of vectorized
     local tag
-    if [[ "${vectorized}" == "1" ]]; then
-        tag="vectorized"
-    else
+    if [[ "${vectorized}" == "0" ]]; then
         tag="loop"
+    elif [[ "${compiled}" == "1" ]]; then
+        tag="compiled"
+    else
+        tag="vectorized"
     fi
 
     local output_dir="${RESULT_DIR}/output_${tag}"
@@ -63,11 +77,12 @@ run_train_bench() {
 
     COIN_GPUS="${GPUS}" \
     COIN_USE_VECTORIZED_LORA="${vectorized}" \
+    COIN_USE_COMPILED_LORA="${compiled}" \
     /data4/home/sqx/.conda/envs/coin/bin/deepspeed \
         --include "localhost:${GPUS}" \
         --master_port "${MASTER_PORT}" \
         ETrain/Train/LLaVA/train_mem.py \
-        --deepspeed ./scripts/zero2.json \
+        --deepspeed ./scripts/zero3_offload.json \
         --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
         --expert_num 8 \
         --model_name_or_path "${MODEL_PATH}" \
@@ -113,13 +128,13 @@ run_train_bench() {
 
     echo "[RESULT] lora_mode=${tag}: total_time=${elapsed}ms for ${MAX_STEPS} steps" | tee -a "${RESULT_DIR}/bench_train_results.txt"
 
-    # Parse training runtime from trainer output
+    # Parse training runtime from trainer output (handles both ' and " quoting from HF Trainer)
     local train_runtime
-    train_runtime=$(grep "train_runtime" "${log_file}" 2>/dev/null | grep -oP '"train_runtime": [0-9.]+' | grep -oP '[0-9.]+' || echo "N/A")
+    train_runtime=$(grep "train_runtime" "${log_file}" 2>/dev/null | grep -oP "(?<=['\"]train_runtime['\"]: )[0-9.]+" || echo "N/A")
     local train_sps
-    train_sps=$(grep "train_samples_per_second" "${log_file}" 2>/dev/null | grep -oP '"train_samples_per_second": [0-9.]+' | grep -oP '[0-9.]+' || echo "N/A")
+    train_sps=$(grep "train_samples_per_second" "${log_file}" 2>/dev/null | grep -oP "(?<=['\"]train_samples_per_second['\"]: )[0-9.]+" || echo "N/A")
     local train_stps
-    train_stps=$(grep "train_steps_per_second" "${log_file}" 2>/dev/null | grep -oP '"train_steps_per_second": [0-9.]+' | grep -oP '[0-9.]+' || echo "N/A")
+    train_stps=$(grep "train_steps_per_second" "${log_file}" 2>/dev/null | grep -oP "(?<=['\"]train_steps_per_second['\"]: )[0-9.]+" || echo "N/A")
 
     echo "  train_runtime=${train_runtime}s, samples/sec=${train_sps}, steps/sec=${train_stps}" | tee -a "${RESULT_DIR}/bench_train_results.txt"
     echo "BENCH_TRAIN mode=${tag} runtime_s=${train_runtime} samples_per_sec=${train_sps} steps_per_sec=${train_stps}" >> "${RESULT_DIR}/bench_train_results.txt"
@@ -134,10 +149,15 @@ echo "GPUs: ${GPUS}, Steps: ${MAX_STEPS}, Subset: ${NUM_SAMPLES} samples" | tee 
 echo "========================================" | tee -a "${RESULT_DIR}/bench_train_results.txt"
 
 # Baseline: original loop
-run_train_bench 0
+run_train_bench 0 0
 
 # Optimized: vectorized einsum
-run_train_bench 1
+run_train_bench 1 0
+
+# Optimized: vectorized + torch.compile (only if explicitly enabled via BENCH_COMPILE=1)
+if [[ "${BENCH_COMPILE:-0}" == "1" ]]; then
+    run_train_bench 1 1
+fi
 
 echo ""
 echo "======== Final Summary ========"

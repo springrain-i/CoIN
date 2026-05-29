@@ -293,6 +293,31 @@ class CoINMOELoraLayer(LoraLayer):
                 nn.init.normal_(self.lora_A[adapter_name].loraA[i].mlp.weight, mean=0.0, std=0.01)
                 nn.init.zeros_(self.lora_B[adapter_name].loraB[i].mlp.weight)
 
+def _moe_lora_compute(
+    lora_x: torch.Tensor,   # (B, T, d_in)
+    A: torch.Tensor,        # (N, r_per, d_in)
+    B: torch.Tensor,        # (N, d_out, r_per)
+    router: torch.Tensor,   # (B, T, N)
+    scaling: float,
+) -> torch.Tensor:
+    """Pure einsum MoE-LoRA computation — extracted for torch.compile."""
+    out_A = torch.einsum('bti,nri->btnr', lora_x, A)   # (B,T,N,r_per)
+    out_B = torch.einsum('btnr,nor->btno', out_A, B)    # (B,T,N,d_out)
+    return (out_B * router.unsqueeze(-1)).sum(dim=2) * scaling
+
+
+import os as _os_module
+_USE_COMPILED_LORA = _os_module.environ.get("COIN_USE_COMPILED_LORA", "0") == "1"
+_moe_lora_compute_compiled = None
+if _USE_COMPILED_LORA:
+    try:
+        _moe_lora_compute_compiled = torch.compile(
+            _moe_lora_compute, fullgraph=False, dynamic=True
+        )
+    except Exception:
+        _moe_lora_compute_compiled = None
+
+
 class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
     # Lora implemented in a dense layer
     # nn.Linear is the pretrained weights in LLM, MMOELoraLayer is the designed trainable Lora 
@@ -380,21 +405,11 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         router:  (B, T, N)   after softmax
         returns: (B, T, d_out)
         """
-        loraA_modules = self.lora_A[active].loraA
-        loraB_modules = self.lora_B[active].loraB
+        A = torch.stack([m.mlp.weight for m in self.lora_A[active].loraA], dim=0)  # (N, r_per, d_in)
+        B = torch.stack([m.mlp.weight for m in self.lora_B[active].loraB], dim=0)  # (N, d_out, r_per)
 
-        # Stack A weights: (N, r_per, d_in)
-        A = torch.stack([m.mlp.weight for m in loraA_modules], dim=0)
-        # (B, T, d_in) x (N, r_per, d_in)^T  →  (B, T, N, r_per)
-        out_A = torch.einsum('bti,nri->btnr', lora_x, A)
-
-        # Stack B weights: (N, d_out, r_per)
-        B = torch.stack([m.mlp.weight for m in loraB_modules], dim=0)
-        # (B, T, N, r_per) x (N, d_out, r_per)^T  →  (B, T, N, d_out)
-        out_B = torch.einsum('btnr,nor->btno', out_A, B)
-
-        # Weighted sum over N experts: (B, T, N, d_out) * (B, T, N, 1) → (B, T, d_out)
-        return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
+        compute_fn = _moe_lora_compute_compiled if _moe_lora_compute_compiled is not None else _moe_lora_compute
+        return compute_fn(lora_x, A, B, router, self.scaling[active])
 
     def forward(self, x: torch.Tensor, **kwargs):
         previous_dtype = x.dtype

@@ -1,0 +1,13 @@
+========================================
+Vectorized LoRA Inference Benchmark
+Date: 2026年 05月 29日 星期五 15:44:27 CST
+GPU: 0, batch_size=1, samples: 300
+========================================
+BENCH_INFER mode=vectorized vectorized=1 gpu=1 n_samples=300 elapsed_ms=218018 throughput_sps=1.376
+BENCH_INFER mode=loop vectorized=0 gpu=0 n_samples=300 elapsed_ms=323526 throughput_sps=0.927
+BENCH_INFER mode=vectorized vectorized=1 gpu=0 n_samples=300 elapsed_ms=200728 throughput_sps=1.495
+
+======== Final Summary ========
+  loop:       0.927 sps
+  vectorized: 1.495 sps
+  speedup:    1.613x

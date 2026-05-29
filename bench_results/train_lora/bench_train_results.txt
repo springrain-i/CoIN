@@ -1,0 +1,17 @@
+========================================
+Training LoRA Vectorization Benchmark
+Date: 2026年 05月 29日 星期五 14:19:12 CST
+GPUs: 4,5,6,7, Steps: 50, Subset: 400 samples
+========================================
+
+=== Training bench: lora_mode=loop ===
+Max steps: 50, GPUs: 4,5,6,7
+[RESULT] lora_mode=loop: total_time=1304675ms for 50 steps
+  train_runtime=1054.8147s, samples/sec=0.758, steps/sec=0.047
+BENCH_TRAIN mode=loop runtime_s=1054.8147 samples_per_sec=0.758 steps_per_sec=0.047
+
+=== Training bench: lora_mode=vectorized ===
+Max steps: 50, GPUs: 4,5,6,7
+[RESULT] lora_mode=vectorized: total_time=1313944ms for 50 steps
+  train_runtime=1057.8739s, samples/sec=0.756, steps/sec=0.047
+BENCH_TRAIN mode=vectorized runtime_s=1057.8739 samples_per_sec=0.756 steps_per_sec=0.047

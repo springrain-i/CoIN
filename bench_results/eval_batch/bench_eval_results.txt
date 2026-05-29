@@ -1,0 +1,2 @@
+BENCH batch_size=1 elapsed_ms=284488 n_samples=200 throughput_sps=0.70
+BENCH batch_size=4 elapsed_ms=111302 n_samples=200 throughput_sps=1.80

@@ -45,3 +45,6 @@ serve_images/
 
 # Experiment logs
 logs/
+# benchmark training outputs (model weights)
+bench_results/**/adapter_model.bin
+bench_results/**/non_lora_trainables.bin
