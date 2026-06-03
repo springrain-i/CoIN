@@ -39,3 +39,4 @@ ckpts*
 
 # Demo
 serve_images/
+.worktrees/
