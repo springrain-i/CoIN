@@ -408,6 +408,17 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         A = torch.stack([m.mlp.weight for m in self.lora_A[active].loraA], dim=0)  # (N, r_per, d_in)
         B = torch.stack([m.mlp.weight for m in self.lora_B[active].loraB], dim=0)  # (N, d_out, r_per)
 
+        if getattr(self, '_log_gradients', False):
+            # Expose intermediates for ModalGradientLogger backward hooks.
+            # out_A / out_B stay in the computation graph so hooks fire during backward.
+            out_A = torch.einsum('bti,nri->btnr', lora_x, A)          # (B,T,N,r_per)
+            out_B = torch.einsum('btnr,nor->btno', out_A, B)           # (B,T,N,d_out)
+            self._log_out_A = out_A
+            self._log_out_B = out_B
+            self._log_lora_x = lora_x
+            self._log_raw_mask = self.token_mask                        # raw {0,1,2} values
+            return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
+
         compute_fn = _moe_lora_compute_compiled if _moe_lora_compute_compiled is not None else _moe_lora_compute
         return compute_fn(lora_x, A, B, router, self.scaling[active])
 
