@@ -91,8 +91,14 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 import json as _json
                 with open(_adapter_config_path) as _f:
                     _peft_type = _json.load(_f).get('peft_type', '')
-            is_moe_moka = (_peft_type == 'MOE_MOKA_CoIN') or ('moka' in model_name.lower())
-            is_coin_moe = (_peft_type == 'MOE_CoIN') or ('MOE' in model_name)
+            if _peft_type:
+                # adapter_config.json is authoritative when present
+                is_moe_moka = (_peft_type == 'MOE_MOKA_CoIN')
+                is_coin_moe = (_peft_type in ('MOE_CoIN', 'MOE_LORA_CoIN'))
+            else:
+                # fallback to name heuristics when no JSON
+                is_moe_moka = 'moka' in model_name.lower()
+                is_coin_moe = 'MOE' in model_name
             if is_moe_moka or is_coin_moe:
                 from CoIN.peft import PeftModel, get_peft_model, CoINMOELoraConfig, MoEMoKALoraConfig, WEIGHTS_NAME
             else:

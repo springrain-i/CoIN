@@ -19,6 +19,16 @@ if [[ -z "$MODELPATH" ]]; then
     exit 1
 fi
 
+# Allow a runtime GPU override: write a comma-separated list to
+# /tmp/coin_gpu_override to switch GPUs between tasks without restarting.
+if [[ -f "/tmp/coin_gpu_override" ]]; then
+    _override="$(cat /tmp/coin_gpu_override)"
+    if [[ -n "$_override" ]]; then
+        export CUDA_VISIBLE_DEVICES="$_override"
+        echo "[eval_common] GPU override applied: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    fi
+fi
+
 # Use CUDA_VISIBLE_DEVICES if set, else auto-detect via nvidia-smi.
 gpu_list="${CUDA_VISIBLE_DEVICES:-}"
 if [[ -z "$gpu_list" ]]; then
@@ -34,3 +44,7 @@ IMAGE_ROOT="${COIN_IMAGE_ROOT}"
 INSTR_ROOT="${COIN_INSTR_ROOT}"
 RESULT_ROOT="${COIN_REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA"
 PYTHON="${COIN_PYTHON}"
+
+# Performance optimizations
+export COIN_USE_SDPA_PATCH=1   # Replace flash_attn with F.scaled_dot_product_attention
+BATCH_SIZE="${COIN_EVAL_BATCH_SIZE:-4}"  # Override with COIN_EVAL_BATCH_SIZE env var

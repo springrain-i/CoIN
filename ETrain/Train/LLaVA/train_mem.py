@@ -2,6 +2,12 @@
 # Adopted from tatsu-lab@stanford_alpaca. Below is the original copyright:
 # Make it more memory efficient by monkey patching the LLaMA model with FlashAttn.
 
+import sys, os as _os
+# Ensure the repo-local ETrain/ takes precedence over the editable src/etrain install.
+_repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 # Need to call this before importing transformers.
 from ETrain.Train.LLaVA.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
 

@@ -61,34 +61,47 @@ COIN_IMAGE_ROOT="${COIN_IMAGE_ROOT:-${DEFAULT_IMAGE_ROOT}}"
 COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-/hy-tmp/checkpoints/LLaVA/CoIN}"
 
 build_ds_include() {
-  # If user provides explicit include, respect it.
+  # Priority 1: explicit COIN_DS_INCLUDE (physical GPU IDs, e.g. "localhost:0,1,2,5").
+  # Set this env var when you want specific non-contiguous GPUs.
+  # Do NOT set CUDA_VISIBLE_DEVICES alongside it — deepspeed --include overrides
+  # CUDA_VISIBLE_DEVICES and uses physical slot IDs directly.
   if [[ -n "${COIN_DS_INCLUDE:-}" ]]; then
     echo "${COIN_DS_INCLUDE}"
     return
   fi
 
-  local gpu_count=0
+  # Priority 2: COIN_GPUS convenience var (comma-separated physical GPU IDs).
+  # e.g. COIN_GPUS=0,1,2,5 → --include localhost:0,1,2,5
+  # Again, do NOT set CUDA_VISIBLE_DEVICES alongside this.
+  if [[ -n "${COIN_GPUS:-}" ]]; then
+    echo "localhost:${COIN_GPUS}"
+    return
+  fi
+
+  # Priority 3: CUDA_VISIBLE_DEVICES is set — use consecutive CUDA slot indices
+  # (0,1,...,N-1) so deepspeed maps them correctly within the CUDA device scope.
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    local cvd_clean
+    local cvd_clean gpu_count
     cvd_clean=$(echo "${CUDA_VISIBLE_DEVICES}" | tr -d ' ')
     IFS=',' read -r -a _cvd_arr <<< "${cvd_clean}"
     gpu_count=${#_cvd_arr[@]}
-  elif command -v nvidia-smi >/dev/null 2>&1; then
+    local slots="" i
+    for ((i=0; i<gpu_count; i++)); do
+      slots="${slots:+${slots},}${i}"
+    done
+    echo "localhost:${slots}"
+    return
+  fi
+
+  # Fallback: use all GPUs.
+  local gpu_count=1
+  if command -v nvidia-smi >/dev/null 2>&1; then
     gpu_count=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)
+    [[ "${gpu_count}" -le 0 ]] && gpu_count=1
   fi
-
-  if [[ "${gpu_count}" -le 0 ]]; then
-    gpu_count=1
-  fi
-
-  local slots=""
-  local i
+  local slots="" i
   for ((i=0; i<gpu_count; i++)); do
-    if [[ -z "${slots}" ]]; then
-      slots="${i}"
-    else
-      slots="${slots},${i}"
-    fi
+    slots="${slots:+${slots},}${i}"
   done
   echo "localhost:${slots}"
 }
@@ -96,8 +109,12 @@ build_ds_include() {
 COIN_DS_INCLUDE="$(build_ds_include)"
 
 # Use explicit python to run deepspeed binary — avoids broken shebang when conda env was relocated.
-COIN_PYTHON="${COIN_PYTHON:-/hy-tmp/miniconda3/envs/coin/bin/python}"
-COIN_DS_BIN="${COIN_DS_BIN:-/hy-tmp/miniconda3/envs/coin/bin/deepspeed}"
+COIN_PYTHON="${COIN_PYTHON:-$(resolve_first_existing_path \
+  /data4/home/sqx/.conda/envs/coin/bin/python \
+  /hy-tmp/miniconda3/envs/coin/bin/python)}"
+COIN_DS_BIN="${COIN_DS_BIN:-$(resolve_first_existing_path \
+  /data4/home/sqx/.conda/envs/coin/bin/deepspeed \
+  /hy-tmp/miniconda3/envs/coin/bin/deepspeed)}"
 COIN_DEEPSPEED="${COIN_PYTHON} ${COIN_DS_BIN}"
 
 # DeepSpeed compilation requirements.
@@ -105,7 +122,7 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-11.8}"
 export CC="${CC:-/usr/bin/gcc-9}"
 export CXX="${CXX:-/usr/bin/g++-9}"
 export CUDAHOSTCXX="${CUDAHOSTCXX:-/usr/bin/g++-9}"
-export PATH="/hy-tmp/miniconda3/envs/coin/bin:${PATH}"
+export PATH="$(dirname "${COIN_PYTHON}"):${PATH}"
 # Redirect torch JIT extension cache to writable /hy-tmp (avoids overlay-fs issues).
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/hy-tmp/torch_extensions}"
 

@@ -19,7 +19,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --max_new_tokens "${MAX_NEW_TOKENS:-50}" \
         --merge-lora False \
         --lora-mode "$LORA_MODE" \
-        --conv-mode vicuna_v1 &
+        --conv-mode vicuna_v1 \
+        --batch-size "$BATCH_SIZE" &
 done
 wait
 
