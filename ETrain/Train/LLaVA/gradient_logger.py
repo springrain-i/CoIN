@@ -87,20 +87,18 @@ class ModalGradientLogger:
 
     def _flush(self, step, layer, g_tA, g_vA, g_tB, g_vB) -> None:
         """Called by hook_A in coinmoelora.py after both hooks have fired."""
-        # Multi-GPU guard: only rank 0 records to avoid duplicated data.
-        try:
-            import torch.distributed as dist
-            if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
-                return
-        except Exception:
-            pass
         if step % self.log_every_n_steps != 0:
             return
         self.records.append(_StepRecord(step, layer, g_tA, g_vA, g_tB, g_vB))
 
     def save_csv(self, task_name: str) -> str:
         os.makedirs(self.output_dir, exist_ok=True)
-        path = os.path.join(self.output_dir, f"{task_name}_grad_stats.csv")
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
+        except Exception:
+            rank = 0
+        path = os.path.join(self.output_dir, f"{task_name}_rank{rank}_grad_stats.csv")
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["step", "layer", "G_text_A", "G_vis_A", "R_A",
@@ -110,7 +108,7 @@ class ModalGradientLogger:
                              f"{r.g_text_A:.6f}", f"{r.g_vis_A:.6f}", f"{r.R_A:.4f}",
                              f"{r.g_text_B:.6f}", f"{r.g_vis_B:.6f}", f"{r.R_B:.4f}"])
         self._print_summary(task_name)
-        print(f"[GradLogger] saved {len(self.records)} records → {path}")
+        print(f"[GradLogger] rank{rank} saved {len(self.records)} records → {path}")
         return path
 
     def clear_records(self) -> None:
