@@ -409,14 +409,75 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         B = torch.stack([m.mlp.weight for m in self.lora_B[active].loraB], dim=0)  # (N, d_out, r_per)
 
         if getattr(self, '_log_gradients', False):
-            # Expose intermediates for ModalGradientLogger backward hooks.
-            # out_A / out_B stay in the computation graph so hooks fire during backward.
-            out_A = torch.einsum('bti,nri->btnr', lora_x, A)          # (B,T,N,r_per)
-            out_B = torch.einsum('btnr,nor->btno', out_A, B)           # (B,T,N,d_out)
-            self._log_out_A = out_A
-            self._log_out_B = out_B
-            self._log_lora_x = lora_x
-            self._log_raw_mask = self.token_mask                        # raw {0,1,2} values
+            # Exact gradient logging for W_A.
+            # Metric: ||G^t_A||_F / ||G^v_A||_F  where
+            #   G^t_A[n,r,d] = Σ_{t∈text} (∂L/∂out_A)[t,n,r] * x[t,d]   (exact outer-product sum)
+            #
+            # Implementation: capture lora_x.detach() in a mutable list closure;
+            # hook_A slices to text/vis rows, computes einsum, then sets x_ref[0]=None to release.
+            # With gradient_checkpointing, hooks are re-registered during recomputation, so
+            # x_ref[0] is always the correct recomputed value when the hook fires.
+            # Peak memory: ~7 modules × 16 MB per checkpoint segment ≈ 112 MB.
+            raw_mask   = self.token_mask           # (B,T) int — tiny
+            logger_ref = getattr(self, '_grad_logger', None)
+            layer_name = getattr(self, '_grad_layer_name', '')
+            step       = logger_ref.step if logger_ref is not None else 0
+            log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
+
+            out_A = torch.einsum('bti,nri->btnr', lora_x, A)  # (B,T,N,r_per)
+            out_B = torch.einsum('btnr,nor->btno', out_A, B)   # (B,T,N,d_out)
+
+            # Mutable list so hook_A can null it out after use (no nonlocal needed)
+            x_ref = [lora_x.detach()]  # (B, T, d_in)  freed in hook_A
+
+            # hook_B: proxy metric for W_B (no x needed, ∂L/∂out_B is sufficient)
+            def hook_B(g_out_B):
+                if logger_ref is None or step % log_every != 0:
+                    return
+                with torch.no_grad():
+                    tm = (raw_mask == 2).float()[:, :, None, None]
+                    vm = (raw_mask == 1).float()[:, :, None, None]
+                    logger_ref._pending[(step, layer_name)] = {
+                        'g_tB': (g_out_B * tm).norm().item(),
+                        'g_vB': (g_out_B * vm).norm().item(),
+                    }
+
+            # hook_A: exact metric for W_A using captured x
+            def hook_A(g_out_A):
+                # g_out_A: (B, T, N, r_per)
+                x_cap = x_ref[0]
+                x_ref[0] = None  # release immediately regardless of log_every
+                if logger_ref is None or step % log_every != 0:
+                    return
+                with torch.no_grad():
+                    # 1D boolean index for text and visual token positions
+                    mask1d = raw_mask[0] if raw_mask.dim() == 2 else raw_mask
+                    t_idx = (mask1d == 2)  # (T,)
+                    v_idx = (mask1d == 1)  # (T,)
+
+                    # Slice: take batch dim 0 (single sample per device)
+                    g_t = g_out_A[0, t_idx, :, :]  # (T_text, N, r_per)
+                    g_v = g_out_A[0, v_idx, :, :]  # (T_vis,  N, r_per)
+                    x_t = x_cap[0,   t_idx, :]      # (T_text, d_in)
+                    x_v = x_cap[0,   v_idx, :]      # (T_vis,  d_in)
+
+                    # Exact outer-product sum across all experts and token positions:
+                    # G^t_A[n,r,d] = Σ_t g_t[t,n,r] * x_t[t,d]
+                    G_t = torch.einsum('tnr,td->nrd', g_t, x_t)  # (N, r_per, d_in)
+                    G_v = torch.einsum('tnr,td->nrd', g_v, x_v)
+
+                    entry = logger_ref._pending.pop((step, layer_name), {})
+                    logger_ref._flush(
+                        step, layer_name,
+                        G_t.norm().item(), G_v.norm().item(),
+                        entry.get('g_tB', 0.0), entry.get('g_vB', 0.0),
+                    )
+
+            if out_B.requires_grad:
+                out_B.register_hook(hook_B)
+            if out_A.requires_grad:
+                out_A.register_hook(hook_A)
+
             return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
 
         compute_fn = _moe_lora_compute_compiled if _moe_lora_compute_compiled is not None else _moe_lora_compute
