@@ -258,59 +258,92 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
             self.lora_router[adapter](dropped_x), dim=-1
         )   # (B, S, N)
 
-        # --- Per-expert contribution ------------------------------------------
-        # Accumulate weighted expert outputs directly in d_out space.
-        expert_sum = torch.zeros(B, S, self.out_features, device=x.device, dtype=x.dtype)
+        # --- Vectorized per-expert contribution ----------------------------------
+        flat_text = dropped_x[text_mask]   # (n_text, d_in)
+        flat_vis  = dropped_x[vis_mask]    # (n_vis,  d_in)
 
-        flat_text = dropped_x[text_mask]   # (n_text, d_in)  may be empty
-        flat_vis  = dropped_x[vis_mask]    # (n_vis,  d_in)  may be empty
-
-        for i, expert in enumerate(self.lora_experts[adapter]):
-            r_per = expert.lora_A_text.out_features
-
-            # Always call both A matrices for consistent ZeRO-3 trace.
-            out_text = expert.lora_A_text(flat_text)   # (n_text, r_per)
-            out_vis  = expert.lora_A_vis(flat_vis)     # (n_vis,  r_per)
-
-            # Reconstruct full sequence in rank-r_per space.
-            a_comb = torch.zeros(B, S, r_per, device=x.device, dtype=x.dtype)
-            if has_text:
-                a_comb[text_mask] = out_text
-            if has_vis:
-                # Intra-expert cross-attention before writing back.
-                if has_text:
-                    out_vis = self._cross_attention(
-                        out_vis, out_text, text_mask, vis_mask, B
-                    )
-                a_comb[vis_mask] = out_vis
-
-            # Per-expert B projects r_per → d_out.
-            out_i = expert.lora_B(a_comb)   # (B, S, d_out)
-
-            # Weighted sum: router_weights[:, :, i] is (B, S).
-            expert_sum = expert_sum + router_weights[:, :, i].unsqueeze(-1) * out_i
+        expert_sum = self._lora_vectorized(
+            flat_text, flat_vis, dropped_x, router_weights,
+            adapter, text_mask, vis_mask, has_text, has_vis, B, S,
+        )
 
         result = result + expert_sum * scaling
         return result.to(previous_dtype)
 
-    @staticmethod
-    def _cross_attention(
-        query: torch.Tensor,       # (n_vis,  r_per)  — visual tokens after A_vis
-        key_val: torch.Tensor,     # (n_text, r_per)  — text   tokens after A_text
+    def _lora_vectorized(
+        self,
+        flat_text: torch.Tensor,   # (n_text, d_in)
+        flat_vis:  torch.Tensor,   # (n_vis,  d_in)
+        dropped_x: torch.Tensor,   # (B, S, d_in)  — for shape/device ref
+        router_weights: torch.Tensor,  # (B, S, N)
+        adapter: str,
         text_mask: torch.Tensor,   # (B, S) bool
-        vis_mask: torch.Tensor,    # (B, S) bool
+        vis_mask:  torch.Tensor,   # (B, S) bool
+        has_text: bool,
+        has_vis:  bool,
+        B: int,
+        S: int,
+    ) -> torch.Tensor:
+        """All N experts computed in parallel via stacked einsum.
+
+        Expert loop O(N) → 2 einsum calls.
+        Cross-attention batch loop retained (variable per-sample token counts);
+        but now processes all N experts simultaneously per sample.
+        """
+        experts = self.lora_experts[adapter]
+        N = len(experts)
+
+        # Stack weights: (N, r_per, d_in) and (N, d_out, r_per)
+        A_text = torch.stack([e.lora_A_text.weight for e in experts], dim=0)
+        A_vis  = torch.stack([e.lora_A_vis.weight  for e in experts], dim=0)
+        B_all  = torch.stack([e.lora_B.weight       for e in experts], dim=0)
+
+        r_per = A_text.shape[1]
+        dev   = dropped_x.device
+        dt    = dropped_x.dtype
+
+        # (n_text, N, r_per) and (n_vis, N, r_per) — all experts at once
+        out_text_N = (torch.einsum('td,nrd->tnr', flat_text, A_text)
+                      if has_text else flat_text.new_zeros(0, N, r_per))
+        out_vis_N  = (torch.einsum('vd,nrd->vnr', flat_vis,  A_vis)
+                      if has_vis  else flat_vis.new_zeros(0, N, r_per))
+
+        # Cross-attention: batch loop, all N experts simultaneously
+        if has_vis and has_text:
+            out_vis_N = self._cross_attention_vec(
+                out_vis_N, out_text_N, text_mask, vis_mask, B
+            )
+
+        # Scatter into (B, S, N, r_per)
+        a_comb = torch.zeros(B, S, N, r_per, device=dev, dtype=dt)
+        if has_text:
+            a_comb[text_mask] = out_text_N
+        if has_vis:
+            a_comb[vis_mask]  = out_vis_N
+
+        # (B, S, N, r_per) × (N, d_out, r_per) → (B, S, N, d_out)
+        out_all = torch.einsum('bsnr,nor->bsno', a_comb, B_all)
+
+        # Router-weighted sum → (B, S, d_out)
+        return (router_weights.unsqueeze(-1) * out_all).sum(dim=2)
+
+    @staticmethod
+    def _cross_attention_vec(
+        query:   torch.Tensor,     # (n_vis,  N, r_per)
+        key_val: torch.Tensor,     # (n_text, N, r_per)
+        text_mask: torch.Tensor,   # (B, S) bool
+        vis_mask:  torch.Tensor,   # (B, S) bool
         batch_size: int,
     ) -> torch.Tensor:
+        """Cross-attention for all N experts simultaneously.
+
+        Batch loop is kept because each sample has variable n_text/n_vis.
+        Within each sample, all N experts are processed in one einsum.
         """
-        Intra-expert cross-attention: visual tokens attend to text tokens.
-        Operates in rank-r_per space; no extra projection matrices.
-        Returns updated visual representations with the same shape as query.
-        """
-        # We need per-sample indices because each sample may have a different
-        # number of text / visual tokens.
         out = query.clone()
-        vis_offset = 0
+        vis_offset  = 0
         text_offset = 0
+        d_k = query.shape[-1]
         for b in range(batch_size):
             n_text = int(text_mask[b].sum())
             n_vis  = int(vis_mask[b].sum())
@@ -319,20 +352,18 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
                 text_offset += n_text
                 continue
 
-            q = query  [vis_offset:  vis_offset  + n_vis ].unsqueeze(0)  # (1, n_vis,  r_per)
-            k = key_val[text_offset: text_offset + n_text].unsqueeze(0)  # (1, n_text, r_per)
-            v = k
+            q  = query  [vis_offset:  vis_offset  + n_vis  ]  # (n_vis,  N, r_per)
+            kv = key_val[text_offset: text_offset + n_text ]  # (n_text, N, r_per)
 
-            d_k = q.shape[-1]
-            score     = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
-            attn_probs = F.softmax(score, dim=-1)
-            attn_out  = torch.matmul(attn_probs, v).squeeze(0)            # (n_vis, r_per)
+            # scores: (n_vis, n_text, N) — all experts in one einsum
+            scores = torch.einsum('vnr,tnr->vtn', q, kv) / math.sqrt(d_k)
+            attn   = F.softmax(scores, dim=1)                 # (n_vis, n_text, N)
+            update = torch.einsum('vtn,tnr->vnr', attn, kv)  # (n_vis, N, r_per)
 
-            out[vis_offset: vis_offset + n_vis] = query[vis_offset: vis_offset + n_vis] + attn_out
+            out[vis_offset: vis_offset + n_vis] = q + update
 
             vis_offset  += n_vis
             text_offset += n_text
-
         return out
 
 
