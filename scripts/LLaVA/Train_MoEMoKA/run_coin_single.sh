@@ -95,11 +95,11 @@ cd "${REPO_ROOT}"
 if [[ -n "${USER_COIN_OUTPUT_ROOT}" ]]; then
   export COIN_OUTPUT_ROOT="${USER_COIN_OUTPUT_ROOT}"
 else
-  export COIN_OUTPUT_ROOT="${REPO_ROOT}/checkpoints/LLaVA/CoIN_single"
+  export COIN_OUTPUT_ROOT="${REPO_ROOT}/checkpoints/LLaVA/CoIN_MoEMoKA_single"
 fi
 
 # Log and state directories for resumable runs.
-LOG_ROOT="${REPO_ROOT}/logs/LLaVA/CoIN_single"
+LOG_ROOT="${REPO_ROOT}/logs/LLaVA/CoIN_MoEMoKA_single"
 STATE_DIR="${LOG_ROOT}/.state"
 mkdir -p "${LOG_ROOT}" "${STATE_DIR}" "${REPO_ROOT}/results/CoIN/LLaVA/metrics"
 
