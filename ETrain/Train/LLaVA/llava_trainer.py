@@ -454,7 +454,9 @@ class LLaVATrainer(Trainer):
                 if getattr(training_args, 'moe_moka_enable', False):
                     # PeftType.MOE_MOKA_CoIN is not registered in get_peft_model_state_dict;
                     # save state_dict directly (keys include adapter_name) + adapter_config.json.
-                    torch.save(state_dict, os.path.join(training_args.output_dir, WEIGHTS_NAME))
+                    # NOTE: use literal "adapter_model.bin", NOT the module-level WEIGHTS_NAME which
+                    # resolves to "pytorch_model.bin" (from transformers.utils, not peft.utils).
+                    torch.save(state_dict, os.path.join(training_args.output_dir, "adapter_model.bin"))
                     self.model.peft_config['default'].save_pretrained(training_args.output_dir)
                 else:
                     self.model.save_pretrained(training_args.output_dir, state_dict=state_dict)
