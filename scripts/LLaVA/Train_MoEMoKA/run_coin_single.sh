@@ -47,25 +47,26 @@ TASK_SCRIPTS=(
 )
 
 EVAL_SCRIPTS=(
-  "${REPO_ROOT}/scripts/LLaVA/Eval/1_eval_sqa.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/2_eval_textqa.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/3_eval_ImageNet.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/4_eval_gqa.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/5_eval_vizwiz.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/6_eval_grounding.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/7_eval_vqav2.sh"
-  "${REPO_ROOT}/scripts/LLaVA/Eval/8_eval_ocrvqa.sh"
+  "${SCRIPT_DIR}/eval/1_eval_sqa.sh"
+  "${SCRIPT_DIR}/eval/2_eval_textqa.sh"
+  "${SCRIPT_DIR}/eval/3_eval_imagenet.sh"
+  "${SCRIPT_DIR}/eval/4_eval_gqa.sh"
+  "${SCRIPT_DIR}/eval/5_eval_vizwiz.sh"
+  "${SCRIPT_DIR}/eval/6_eval_grounding.sh"
+  "${SCRIPT_DIR}/eval/7_eval_vqav2.sh"
+  "${SCRIPT_DIR}/eval/8_eval_ocrvqa.sh"
 )
 
+# Must match RESULT_ROOT/{Task} in scripts/LLaVA/Train_MoEMoKA/eval/eval_common.sh
 RESULT_DIRS=(
-  "${REPO_ROOT}/results/CoIN/LLaVA/ScienceQA_NoMerge_Visual"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_ON_ImageNet_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/GQA_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VizWiz"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Grounding"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VQAv2"
-  "${REPO_ROOT}/results/CoIN/LLaVA/OCRVQA"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/ScienceQA"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/TextVQA"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/ImageNet"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/GQA"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/VizWiz"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/Grounding"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/VQAv2"
+  "${REPO_ROOT}/results/CoIN/LLaVA/MoEMoKA/OCRVQA"
 )
 
 START_TASK=${1:-1}
@@ -78,9 +79,9 @@ FORCE_EVAL=${FORCE_EVAL:-0}
 SKIP_TRAIN_TASKS=${SKIP_TRAIN_TASKS:-""}
 SKIP_EVAL_TASKS=${SKIP_EVAL_TASKS:-""}
 MODES=${MODES:-"all text visual"}
-STAGE_PREFIX=${STAGE_PREFIX:-"CoIN"}
+STAGE_PREFIX=${STAGE_PREFIX:-"MoEMoKA_single"}
 REGIME=${REGIME:-"single"}
-OUT_CSV=${OUT_CSV:-"results/CoIN/LLaVA/metrics/single_eval_matrix.csv"}
+OUT_CSV=${OUT_CSV:-"results/CoIN/LLaVA/metrics/MoEMoKA_single_eval_matrix.csv"}
 
 if [[ "$START_TASK" -lt 1 || "$END_TASK" -gt 8 || "$START_TASK" -gt "$END_TASK" ]]; then
   echo "Invalid range. Usage: bash scripts/LLaVA/Train_MoEMoKA/run_coin_single.sh [start_task(1-8)] [end_task(1-8)]"
