@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoIN/MoEMoKA · 训练性能优化分析报告</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0b0d0f;
+    --bg2:       #111417;
+    --bg3:       #171b1f;
+    --border:    #1e2328;
+    --border2:   #252a30;
+    --text:      #c8d0d8;
+    --text-dim:  #5a6370;
+    --text-mid:  #8c97a4;
+    --amber:     #f0a500;
+    --amber-dim: #7a5200;
+    --red:       #e05252;
+    --red-dim:   #5c1f1f;
+    --green:     #3fb950;
+    --green-dim: #193d20;
+    --blue:      #58a6ff;
+    --blue-dim:  #1a2d4a;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  /* ── SCAN LINE overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,.08) 2px,
+      rgba(0,0,0,.08) 4px
+    );
+  }
+
+  /* ── HEADER ── */
+  header {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(11,13,15,.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 52px;
+  }
+  .header-left {
+    display: flex; align-items: center; gap: 1rem;
+  }
+  .logo {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+  .header-sep { color: var(--border2); }
+  .header-title {
+    font-size: 12px;
+    color: var(--text-mid);
+    letter-spacing: .04em;
+  }
+  .header-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .pulse {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    margin-right: 6px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63,185,80,.4); }
+    50%      { opacity: .6; box-shadow: 0 0 0 4px rgba(63,185,80,0); }
+  }
+
+  /* ── LAYOUT ── */
+  .layout { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 52px); position: relative; z-index: 1; }
+
+  /* ── SIDEBAR ── */
+  aside {
+    border-right: 1px solid var(--border);
+    padding: 2rem 0;
+    position: sticky; top: 52px; height: calc(100vh - 52px);
+    overflow-y: auto;
+  }
+  .nav-section { margin-bottom: 2rem; }
+  .nav-label {
+    font-size: 10px; letter-spacing: .15em; text-transform: uppercase;
+    color: var(--text-dim); padding: 0 1.5rem; margin-bottom: .5rem;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .35rem 1.5rem;
+    font-size: 12px; color: var(--text-mid);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: all .15s;
+    cursor: pointer;
+  }
+  .nav-item:hover { color: var(--text); background: var(--bg2); border-left-color: var(--border2); }
+  .nav-item.active { color: var(--amber); border-left-color: var(--amber); background: rgba(240,165,0,.06); }
+  .nav-badge {
+    margin-left: auto; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; font-weight: 600;
+  }
+  .p0 { background: rgba(224,82,82,.18); color: var(--red); }
+  .p1 { background: rgba(240,165,0,.18); color: var(--amber); }
+  .p2 { background: rgba(88,166,255,.18); color: var(--blue); }
+  .p3 { background: rgba(63,185,80,.15); color: var(--green); }
+
+  /* ── MAIN ── */
+  main { padding: 3rem 3.5rem; max-width: 860px; }
+
+  /* ── HERO ── */
+  .hero {
+    margin-bottom: 3.5rem;
+    animation: fadeUp .5s ease both;
+  }
+  .hero-eyebrow {
+    font-size: 11px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--text-dim); margin-bottom: .8rem;
+  }
+  .hero-title {
+    font-family: var(--sans);
+    font-size: 34px; font-weight: 800; line-height: 1.1;
+    color: #e8edf2; margin-bottom: 1rem;
+  }
+  .hero-title span { color: var(--amber); }
+  .hero-desc { font-size: 13px; color: var(--text-mid); max-width: 520px; line-height: 1.75; }
+
+  /* ── STAT ROW ── */
+  .stat-row {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    margin-bottom: 3rem;
+    animation: fadeUp .5s .1s ease both;
+  }
+  .stat {
+    background: var(--bg2); padding: 1.2rem 1.4rem;
+  }
+  .stat-label { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-dim); margin-bottom: .4rem; }
+  .stat-val { font-size: 22px; font-weight: 700; color: var(--text); }
+  .stat-val.warn { color: var(--amber); }
+  .stat-val.bad  { color: var(--red); }
+  .stat-sub { font-size: 11px; color: var(--text-dim); margin-top: .2rem; }
+
+  /* ── GPU BAR ── */
+  .gpu-grid {
+    display: flex; flex-direction: column; gap: .5rem;
+    background: var(--bg2); border: 1px solid var(--border);
+    padding: 1.2rem 1.4rem; margin-bottom: 3rem;
+    animation: fadeUp .5s .15s ease both;
+  }
+  .gpu-row { display: flex; align-items: center; gap: .8rem; }
+  .gpu-label { font-size: 11px; color: var(--text-dim); width: 44px; flex-shrink: 0; }
+  .gpu-bar-track { flex: 1; height: 6px; background: var(--border2); border-radius: 3px; overflow: hidden; }
+  .gpu-bar-fill { height: 100%; border-radius: 3px; animation: growBar .8s cubic-bezier(.4,0,.2,1) both; }
+  @keyframes growBar { from { width: 0 !important; } }
+  .gpu-pct { font-size: 11px; color: var(--text-mid); width: 36px; text-align: right; }
+  .gpu-mem { font-size: 11px; color: var(--text-dim); width: 90px; text-align: right; }
+
+  /* ── SECTION ── */
+  .section {
+    margin-bottom: 3.5rem;
+    animation: fadeUp .5s ease both;
+  }
+  .section-header {
+    display: flex; align-items: baseline; gap: 1rem;
+    margin-bottom: 1.5rem; padding-bottom: .75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-num {
+    font-size: 10px; letter-spacing: .15em; color: var(--text-dim);
+  }
+  .section-title {
+    font-family: var(--sans); font-size: 18px; font-weight: 700;
+    color: #dde4ec;
+  }
+  .priority-tag {
+    margin-left: auto; font-size: 10px; font-weight: 700;
+    padding: 2px 8px; border-radius: 3px; letter-spacing: .08em;
+  }
+
+  /* ── ALERT BOX ── */
+  .alert {
+    border-left: 3px solid; padding: 1rem 1.2rem;
+    margin-bottom: 1.2rem; background: var(--bg2);
+    font-size: 13px; line-height: 1.65;
+  }
+  .alert.critical { border-color: var(--red);   background: rgba(224,82,82,.06); }
+  .alert.warn     { border-color: var(--amber);  background: rgba(240,165,0,.06); }
+  .alert.info     { border-color: var(--blue);   background: rgba(88,166,255,.06); }
+  .alert.ok       { border-color: var(--green);  background: rgba(63,185,80,.06); }
+  .alert-head {
+    font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    margin-bottom: .4rem;
+  }
+  .alert.critical .alert-head { color: var(--red); }
+  .alert.warn     .alert-head { color: var(--amber); }
+  .alert.info     .alert-head { color: var(--blue); }
+  .alert.ok       .alert-head { color: var(--green); }
+
+  /* ── CODE ── */
+  pre {
+    background: #0d1117; border: 1px solid var(--border2);
+    padding: 1rem 1.2rem; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    margin: .8rem 0 1.2rem;
+  }
+  code { font-family: var(--mono); }
+  .cm { color: #5a6c7d; }             /* comment */
+  .ck { color: #ff7b72; }             /* keyword */
+  .cs { color: #a5d6ff; }             /* string */
+  .cn { color: #79c0ff; }             /* name */
+  .co { color: #ffa657; }             /* operator/number */
+  .cc { color: var(--text); }         /* code normal */
+  .hl { background: rgba(240,165,0,.12); display: block; margin: 0 -1.2rem; padding: 0 1.2rem; }
+
+  /* ── PROSE ── */
+  p { font-size: 13px; color: var(--text); line-height: 1.75; margin-bottom: .9rem; }
+  strong { color: #e8edf2; font-weight: 600; }
+  em { color: var(--amber); font-style: normal; }
+
+  /* ── TABLE ── */
+  .table-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    background: var(--bg3); color: var(--text-dim);
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    padding: .6rem 1rem; text-align: left;
+    border-bottom: 1px solid var(--border2);
+  }
+  td {
+    padding: .55rem 1rem; border-bottom: 1px solid var(--border);
+    color: var(--text); vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* ── DIFF VIEW ── */
+  .diff { font-size: 12.5px; }
+  .diff-del { background: rgba(224,82,82,.12); color: #ff9a9a; display: block; padding: 0 1.2rem; margin: 0 -1.2rem; }
+  .diff-add { background: rgba(63,185,80,.1); color: #7ee787; display: block; padding: 0 1.2rem; margin: 0 -1.2rem; }
+
+  /* ── CHECKLIST ── */
+  .checklist { list-style: none; padding: 0; }
+  .checklist li {
+    display: flex; align-items: flex-start; gap: .7rem;
+    padding: .4rem 0; font-size: 13px; color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+  .checklist li:last-child { border: none; }
+  .check-icon { flex-shrink: 0; margin-top: 2px; }
+
+  /* ── MEMORY MAP ── */
+  .mem-map {
+    display: flex; gap: 2px; height: 20px; border-radius: 3px;
+    overflow: hidden; margin: .8rem 0;
+  }
+  .mem-seg {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; letter-spacing: .05em;
+    transition: opacity .2s;
+  }
+  .mem-seg:hover { opacity: .8; }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top: 1px solid var(--border); padding: 1.5rem 3.5rem;
+    font-size: 11px; color: var(--text-dim);
+    display: flex; justify-content: space-between; align-items: center;
+    position: relative; z-index: 1;
+  }
+
+  /* ── ANIMATIONS ── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .section:nth-child(1) { animation-delay: .05s; }
+  .section:nth-child(2) { animation-delay: .10s; }
+  .section:nth-child(3) { animation-delay: .15s; }
+  .section:nth-child(4) { animation-delay: .20s; }
+  .section:nth-child(5) { animation-delay: .25s; }
+
+  /* ── BENCH TABLE ── */
+  .bench-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: .8rem; }
+  .bench-table th {
+    background: var(--bg3); color: var(--text-dim);
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    padding: .5rem .8rem; text-align: left;
+    border-bottom: 1px solid var(--border2);
+  }
+  .bench-table td { padding: .45rem .8rem; border-bottom: 1px solid var(--border); color: var(--text); }
+  .bench-table tr:last-child td { border-bottom: none; }
+  .good { color: var(--green); font-weight: 600; }
+  .bad  { color: var(--red);   font-weight: 600; }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <span class="logo">CoIN · MoEMoKA</span>
+    <span class="header-sep">/</span>
+    <span class="header-title">性能优化分析报告</span>
+  </div>
+  <div class="header-meta">
+    optimize 分支 · 2026-05-29 更新
+  </div>
+</header>
+
+<div class="layout">
+<aside>
+  <div class="nav-section">
+    <div class="nav-label">概况</div>
+    <a class="nav-item active" href="#overview">性能概览</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">优化项</div>
+    <a class="nav-item" href="#done-vectorized">
+      MoELoRA 向量化 forward ✓
+      <span class="nav-badge p0" style="background:rgba(63,185,80,.2);color:var(--green)">完成</span>
+    </a>
+    <a class="nav-item" href="#done-eval-batch">
+      Eval 批量推理 ✓
+      <span class="nav-badge p1" style="background:rgba(63,185,80,.2);color:var(--green)">完成</span>
+    </a>
+    <a class="nav-item" href="#p0-flash">
+      Flash Attention &amp; SDPA 替换 ✓
+      <span class="nav-badge p0" style="background:rgba(63,185,80,.2);color:var(--green)">完成</span>
+    </a>
+    <a class="nav-item" href="#p1-zero3">
+      ZeRO-3 bucket 调优 ⊘
+      <span class="nav-badge" style="background:rgba(139,148,158,.2);color:var(--text-dim)">跳过</span>
+    </a>
+    <a class="nav-item" href="#p2-compile">
+      torch.compile ⊘
+      <span class="nav-badge" style="background:rgba(139,148,158,.2);color:var(--text-dim)">跳过</span>
+    </a>
+    <a class="nav-item" href="#p2-zero2">
+      ZeRO-2 可行性 ✗
+      <span class="nav-badge p2" style="background:rgba(224,82,82,.2);color:var(--red)">不可行</span>
+    </a>
+    <a class="nav-item" href="#p3-eval">
+      Eval model-server 复用
+      <span class="nav-badge p3">P3</span>
+    </a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">汇总</div>
+    <a class="nav-item" href="#summary">
+      优化路线图
+      <span class="nav-badge" style="background:rgba(88,166,255,.15);color:var(--blue)">全览</span>
+    </a>
+  </div>
+</aside>
+
+<main>
+
+<!-- ═══ OPTIMIZATION ROADMAP TABLE ═══ -->
+<div id="summary" style="margin-bottom:1.6rem">
+  <div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.7rem">// 优化路线图 · 全部优化项一览</div>
+  <div class="table-wrap" style="margin:0">
+  <table style="font-size:12.5px">
+    <thead>
+      <tr>
+        <th style="width:36px">优先级</th>
+        <th>优化项</th>
+        <th style="text-align:center;width:100px">预计加速</th>
+        <th style="text-align:center;width:80px">是否尝试</th>
+        <th style="text-align:center;width:120px">实际加速</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <!-- ── 已实施 ── -->
+      <tr style="background:rgba(63,185,80,.05)">
+        <td style="text-align:center"><span style="background:rgba(63,185,80,.25);color:var(--green);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">✓</span></td>
+        <td>
+          <strong>Eval 批量推理</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">batch_size=4，left-pad，全部 5 个 eval 文件 · optimize 分支</span>
+        </td>
+        <td style="text-align:center;color:var(--green)">3~6×</td>
+        <td style="text-align:center"><span style="color:var(--green);font-weight:700">✓ 已实施</span></td>
+        <td style="text-align:center">
+          <span style="font-size:1.3rem;font-family:var(--mono);font-weight:700;color:var(--green)">2.57×</span><br>
+          <span style="font-size:10px;color:var(--text-dim)">284s→111s · 200样本</span>
+        </td>
+      </tr>
+
+      <tr style="background:rgba(63,185,80,.05)">
+        <td style="text-align:center"><span style="background:rgba(63,185,80,.25);color:var(--green);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">✓</span></td>
+        <td>
+          <strong>MoELoRA 向量化 Forward</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">8 串行 Python dispatch → 2 einsum fused kernel · coinmoelora.py</span>
+        </td>
+        <td style="text-align:center;color:var(--text-mid)">~0%（训练）<br><span style="font-size:10px;color:var(--green)">1.5×+（推理）</span></td>
+        <td style="text-align:center"><span style="color:var(--green);font-weight:700">✓ 已实施</span></td>
+        <td style="text-align:center">
+          <span style="color:var(--text-mid);font-size:11px;font-weight:600">~1.0×（训练）</span><br>
+          <span style="font-size:11px;color:var(--green);font-weight:700">1.48～1.61×（推理）</span><br>
+          <span style="font-size:10px;color:var(--text-dim)">batch=1 · 2 次独立测量</span>
+        </td>
+      </tr>
+
+      <tr style="background:rgba(63,185,80,.05)">
+        <td style="text-align:center"><span style="background:rgba(63,185,80,.25);color:var(--green);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">✓</span></td>
+        <td>
+          <strong>Flash Attention &amp; SDPA 替换</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">训练：flash_attn v2.5.6 已生效 · Eval：SDPA patch 修复 decode 崩溃，三场景通过，速度中性</span>
+        </td>
+        <td style="text-align:center;color:var(--green)">训练 10~20%<br><span style="font-size:10px;color:var(--text-dim)">eval 速度中性（正确性收益）</span></td>
+        <td style="text-align:center"><span style="color:var(--green);font-weight:700">✓ 已完成</span></td>
+        <td style="text-align:center">
+          <span style="color:var(--green);font-size:11px;font-weight:600">训练已内含 · eval 1.440 sps</span><br>
+          <span style="font-size:10px;color:var(--text-dim)">baseline 1.495 vs SDPA 1.440（±4% 噪声）</span>
+        </td>
+      </tr>
+
+      <tr style="opacity:0.6">
+        <td style="text-align:center"><span style="background:rgba(139,148,158,.15);color:var(--text-dim);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">⊘</span></td>
+        <td>
+          <strong>ZeRO-3 bucket size 调优</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">评估后跳过：GPU 显存余量不足（90%+）、LoRA 梯度通信量小、overlap_comm 已开、4 卡 PCIe 收益有限</span>
+        </td>
+        <td style="text-align:center;color:var(--text-dim)">—</td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">⊘ 跳过</span></td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">OOM 风险 &gt; 预期收益</span></td>
+      </tr>
+
+      <tr style="opacity:0.6">
+        <td style="text-align:center"><span style="background:rgba(139,148,158,.15);color:var(--text-dim);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">⊘</span></td>
+        <td>
+          <strong>torch.compile Kernel Fusion</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">评估后跳过：PyTorch 2.0.1 compile 不稳定、ZeRO-3 hook 兼容性差、LoRA adapter 占比小、调试成本高；升级 PyTorch ≥ 2.2 后重新评估</span>
+        </td>
+        <td style="text-align:center;color:var(--text-dim)">—</td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">⊘ 跳过</span></td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">待 PyTorch ≥ 2.2</span></td>
+      </tr>
+
+      <tr>
+        <td style="text-align:center"><span style="background:rgba(88,166,255,.15);color:var(--blue);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">P2</span></td>
+        <td>
+          <strong>ZeRO-2 可行性评估</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">当前 ZeRO-3 GPU 1/2 已达 92/90%；切 ZeRO-2 可降通信开销但需更多显存 headroom</span>
+        </td>
+        <td style="text-align:center;color:var(--blue)">10~20%<br><span style="font-size:10px;color:var(--text-dim)">训练步速</span></td>
+        <td style="text-align:center"><span style="color:var(--red);font-weight:700">✗ 不可行</span></td>
+        <td style="text-align:center"><span style="color:var(--red);font-size:11px">OOM<br><span style="font-size:10px;color:var(--text-dim)">83GB RAM < 112GB需求</span></span></td>
+      </tr>
+
+      <tr>
+        <td style="text-align:center"><span style="background:rgba(90,99,112,.2);color:var(--text-mid);display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700">P3</span></td>
+        <td>
+          <strong>Eval Model Server 复用（vLLM/SGLang）</strong><br>
+          <span style="font-size:11px;color:var(--text-dim)">8 任务共享同一 inference server，避免每次重载模型（~30~60s/task 加载开销）</span>
+        </td>
+        <td style="text-align:center;color:var(--blue)">eval 2~5×<br><span style="font-size:10px;color:var(--text-dim)">（叠加 batch 推理）</span></td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">✗ 未实施</span></td>
+        <td style="text-align:center"><span style="color:var(--text-dim)">—</span></td>
+      </tr>
+
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<!-- BENCHMARK SUMMARY -->
+<div style="margin-bottom:1.4rem;padding:1rem 1.2rem;background:var(--bg2);border:1px solid var(--border2);border-radius:6px;font-size:12.5px">
+  <div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.6rem">// 实测结果摘要 · 2026-05-29</div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem">
+    <div style="padding:.7rem .9rem;background:rgba(63,185,80,.07);border:1px solid rgba(63,185,80,.2);border-radius:4px">
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:.3rem">向量化 FORWARD 推理（batch=1）</div>
+      <div style="font-size:1.6rem;font-weight:700;color:var(--green)">1.48～1.61×</div>
+      <div style="font-size:10px;color:var(--text-mid)">0.927→1.376/1.495 sps · 300 样本 · 2 次独立测量</div>
+    </div>
+    <div style="padding:.7rem .9rem;background:rgba(63,185,80,.07);border:1px solid rgba(63,185,80,.2);border-radius:4px">
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:.3rem">EVAL 批量推理（batch=4）</div>
+      <div style="font-size:1.6rem;font-weight:700;color:var(--green)">2.57×</div>
+      <div style="font-size:10px;color:var(--text-mid)">284s → 111s · 200 样本 · GPU 6（含向量化）</div>
+    </div>
+    <div style="padding:.7rem .9rem;background:rgba(90,99,112,.07);border:1px solid var(--border2);border-radius:4px">
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:.3rem">TRAINING 向量化（ZeRO-3 offload）</div>
+      <div style="font-size:1.6rem;font-weight:700;color:var(--text-mid)">~1.0×</div>
+      <div style="font-size:10px;color:var(--text-mid)">1054.8s vs 1057.9s · 50 步 · 4 GPU</div>
+    </div>
+    <div style="padding:.7rem .9rem;background:rgba(224,82,82,.07);border:1px solid rgba(224,82,82,.2);border-radius:4px">
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:.3rem">ZeRO-2 替换</div>
+      <div style="font-size:1.6rem;font-weight:700;color:var(--red)">OOM</div>
+      <div style="font-size:10px;color:var(--text-mid)">83GB RAM &lt; 112GB 需求 · 已排除</div>
+    </div>
+  </div>
+</div>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-eyebrow">// 性能分析 · 代码审查 + 实测 benchmark + ZeRO-3 配置审计 · 最后更新 2026-05-29</div>
+  <h1 class="hero-title">CoIN / MoELoRA<br><span>训练 &amp; 推理加速分析</span></h1>
+  <p class="hero-desc">
+    MoELoRA 向量化 forward 推理孤立测量 <strong style="color:var(--green)">1.48～1.61×</strong>（batch=1，300 样本，2 次独立测量）；
+    Eval 批量推理（batch=4）<strong style="color:var(--green)">2.57×</strong>；
+    训练（ZeRO-3 offload）~1.0×（通信开销主导）；ZeRO-2 实测 OOM 已排除。
+  </p>
+</div>
+
+<!-- STAT ROW -->
+<div id="overview" class="stat-row">
+  <div class="stat">
+    <div class="stat-label">训练步时（benchmark）</div>
+    <div class="stat-val" style="color:var(--text)">~16.6s</div>
+    <div class="stat-sub">/ step · ZeRO-3 offload · 4GPU</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">向量化 Forward 推理加速</div>
+    <div class="stat-val" style="color:var(--green);font-size:18px">1.48～1.61×</div>
+    <div class="stat-sub">batch=1 · 300 样本 · 2 次测量</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Eval 批量推理加速</div>
+    <div class="stat-val" style="color:var(--green)">2.57×</div>
+    <div class="stat-sub">batch=4 · 284s→111s</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">PyTorch 版本</div>
+    <div class="stat-val">2.0.1</div>
+    <div class="stat-sub">CUDA 11.8 · coin 环境</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">flash_attn 包</div>
+    <div class="stat-val" style="color:var(--green)">v2.5.6 ✓</div>
+    <div class="stat-sub">训练生效，eval 不适用</div>
+  </div>
+</div>
+
+<!-- ═══ 已实施：MoELoRA 向量化 ═══ -->
+<div id="done-vectorized" class="section">
+  <div class="section-header">
+    <span class="section-num">00-A</span>
+    <h2 class="section-title">MoELoRA 向量化 Forward — <span style="color:var(--green)">已实施</span></h2>
+    <span class="priority-tag" style="background:rgba(63,185,80,.15);color:var(--green)">✓ optimize 分支</span>
+  </div>
+
+  <div class="alert ok">
+    <div class="alert-head">已在 optimize 分支实施向量化 LoRA forward</div>
+    针对 moelora（<code>CoINMOELoraLinear</code>），将 8 次串行 Python dispatch 替换为
+    2 次 <code>torch.einsum</code> batched 操作。通过 <code>COIN_USE_VECTORIZED_LORA</code>
+    环境变量控制，默认启用，可随时关闭回退原始 loop。
+  </div>
+
+  <p>原始 loop（8 次 Python dispatch，串行，无法 CUDA kernel 融合）：</p>
+
+<pre><span class="cm"># coinmoelora.py · 原始版本</span>
+<span class="ck">for</span> i <span class="ck">in</span> <span class="cn">range</span>(<span class="co">self</span>.expert_num):  <span class="cm"># 8 次串行</span>
+    result += (
+        <span class="co">self</span>.lora_B[active].loraB[i](
+            <span class="co">self</span>.lora_A[active].loraA[i](lora_x)
+        )
+        * <span class="co">self</span>.scaling[active]
+        * router[:,:,i].unsqueeze(-1)
+    )</pre>
+
+  <p>向量化版本（2 次 einsum，单次 CUDA kernel 融合所有专家）：</p>
+
+<pre><span class="cm"># coinmoelora.py · 向量化版本（optimize 分支）</span>
+<span class="cm"># A_stack: (N, r_per, d_in)  B_stack: (N, d_out, r_per)</span>
+A = torch.stack([m.mlp.weight <span class="ck">for</span> m <span class="ck">in</span> loraA_modules], dim=0)
+<span class="cm"># (B,T,d_in) × (N,r_per,d_in)ᵀ → (B,T,N,r_per)</span>
+out_A = torch.<span class="cn">einsum</span>(<span class="cs">'bti,nri->btnr'</span>, lora_x, A)
+
+B = torch.stack([m.mlp.weight <span class="ck">for</span> m <span class="ck">in</span> loraB_modules], dim=0)
+<span class="cm"># (B,T,N,r_per) × (N,d_out,r_per)ᵀ → (B,T,N,d_out)</span>
+out_B = torch.<span class="cn">einsum</span>(<span class="cs">'btnr,nor->btno'</span>, out_A, B)
+
+<span class="cm"># 加权求和：(B,T,N,d_out) * (B,T,N,1) → (B,T,d_out)</span>
+<span class="ck">return</span> (out_B * router.unsqueeze(-1)).sum(dim=2) * <span class="co">self</span>.scaling[active]</pre>
+
+  <div class="alert info">
+    <div class="alert-head">使用方式</div>
+<pre>COIN_USE_VECTORIZED_LORA=1 python ...   <span class="cm"># 默认启用</span>
+COIN_USE_VECTORIZED_LORA=0 python ...   <span class="cm"># 回退 loop（用于 A/B 对比测试）</span></pre>
+    训练 micro-benchmark 脚本：<code>scripts/LLaVA/bench_train_lora.sh</code>（50 步，400 样本，GPU 4,5,6,7）
+  </div>
+
+  <div class="alert ok" id="bench-infer-results" style="margin-top:1rem">
+    <div class="alert-head">✅ 推理 Benchmark 实测（2026-05-29）：向量化 forward 孤立测量，batch_size=1</div>
+    <p style="font-size:12px;margin-bottom:.5rem">
+      控制变量：固定 batch_size=1，仅切换 <code>COIN_USE_VECTORIZED_LORA</code>；
+      GPU 0（loop）与 GPU 1（vectorized）并行运行，互不干扰，ScienceQA 各 300 样本。
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <tr style="color:var(--text-dim);border-bottom:1px solid var(--border2)">
+        <th style="text-align:left;padding:.3rem .6rem">模式</th>
+        <th style="text-align:right;padding:.3rem .6rem">总耗时</th>
+        <th style="text-align:right;padding:.3rem .6rem">吞吐量</th>
+        <th style="text-align:right;padding:.3rem .6rem">加速比</th>
+      </tr>
+      <tr>
+        <td style="padding:.3rem .6rem">Loop（原始，8 次串行 dispatch）</td>
+        <td style="text-align:right;padding:.3rem .6rem">323.5s</td>
+        <td style="text-align:right;padding:.3rem .6rem">0.927 sps</td>
+        <td style="text-align:right;padding:.3rem .6rem;color:var(--text-mid)">1.0×（基准）</td>
+      </tr>
+      <tr style="color:var(--green)">
+        <td style="padding:.3rem .6rem">Einsum（向量化）— 测量①并行</td>
+        <td style="text-align:right;padding:.3rem .6rem">218.0s</td>
+        <td style="text-align:right;padding:.3rem .6rem">1.376 sps</td>
+        <td style="text-align:right;padding:.3rem .6rem;font-weight:700">1.48×</td>
+      </tr>
+      <tr style="color:var(--green)">
+        <td style="padding:.3rem .6rem">Einsum（向量化）— 测量②顺序</td>
+        <td style="text-align:right;padding:.3rem .6rem">200.7s</td>
+        <td style="text-align:right;padding:.3rem .6rem">1.495 sps</td>
+        <td style="text-align:right;padding:.3rem .6rem;font-weight:700">1.61×</td>
+      </tr>
+    </table>
+    <p style="margin-top:.5rem;font-size:12px">
+      加速范围：<strong style="color:var(--green)">1.48～1.61×</strong>（测量①为 GPU 0/1 并行，有轻微 PCIe 竞争；
+      测量②为 GPU 0 顺序独立运行，略快）
+    </p>
+    <p style="margin-top:.3rem;font-size:11px;color:var(--text-dim)">
+      GPU 0/1（RTX 3090 × 2）· batch_size=1 · ScienceQA 300 样本 · max_new_tokens=10 ·
+      脚本：<code>scripts/LLaVA/bench_vectorized_infer.sh</code>
+    </p>
+  </div>
+
+  <div class="alert warn" id="bench-train-results" style="margin-top:1rem">
+    <div class="alert-head">⚠️ 训练 Benchmark 实测（2026-05-29）：ZeRO-3 CPU Offload 主导，向量化无加速</div>
+    <table style="width:100%;border-collapse:collapse;margin-top:.6rem;font-size:12px;">
+      <tr style="color:var(--text-dim);border-bottom:1px solid var(--border2)">
+        <th style="text-align:left;padding:.3rem .6rem">模式</th>
+        <th style="text-align:right;padding:.3rem .6rem">train_runtime</th>
+        <th style="text-align:right;padding:.3rem .6rem">steps/sec</th>
+        <th style="text-align:right;padding:.3rem .6rem">samples/sec</th>
+        <th style="text-align:right;padding:.3rem .6rem">稳态 s/step</th>
+        <th style="text-align:right;padding:.3rem .6rem">加速比</th>
+      </tr>
+      <tr>
+        <td style="padding:.3rem .6rem">Loop（原始）</td>
+        <td style="text-align:right;padding:.3rem .6rem">1054.8s</td>
+        <td style="text-align:right;padding:.3rem .6rem">0.047</td>
+        <td style="text-align:right;padding:.3rem .6rem">0.758</td>
+        <td style="text-align:right;padding:.3rem .6rem">~16.6s</td>
+        <td style="text-align:right;padding:.3rem .6rem;color:var(--text-mid)">1.0×（基准）</td>
+      </tr>
+      <tr>
+        <td style="padding:.3rem .6rem">Einsum（向量化）</td>
+        <td style="text-align:right;padding:.3rem .6rem">1057.9s</td>
+        <td style="text-align:right;padding:.3rem .6rem">0.047</td>
+        <td style="text-align:right;padding:.3rem .6rem">0.756</td>
+        <td style="text-align:right;padding:.3rem .6rem">~16.9s</td>
+        <td style="text-align:right;padding:.3rem .6rem;color:var(--red)">0.997×（-0.3%，噪声内）</td>
+      </tr>
+    </table>
+    <p style="margin-top:.6rem;font-size:12px">
+      <strong>根因：</strong>ZeRO-3 + CPU offload 每步 AllGather 全量参数（14GB）+ DeepSpeedCPUAdam 更新占步时 &gt;99%。
+      LoRA forward 计算量极小，向量化节省的 μs 被通信延迟（秒量级）完全掩盖。
+      纯推理（无 ZeRO-3 通信）场景下向量化效果显著，见上方推理表格。
+    </p>
+    <p style="margin-top:.3rem;font-size:11px;color:var(--text-dim)">
+      GPU 4,5,6,7 · ZeRO-3+CPU offload · bf16 · batch=4 · lora_r=128 · 8 experts ·
+      GCC: <code>CC=/usr/bin/gcc-9</code>（CUDA 11.8 兼容，系统默认 GCC12 无法编译 CPUAdam）
+    </p>
+  </div>
+</div>
+
+<!-- ═══ 已实施：Eval Batch 批量推理 ═══ -->
+<div id="done-eval-batch" class="section">
+  <div class="section-header">
+    <span class="section-num">00-B</span>
+    <h2 class="section-title">Eval 批量推理 — <span style="color:var(--green)">已实施</span></h2>
+    <span class="priority-tag" style="background:rgba(63,185,80,.15);color:var(--green)">✓ optimize 分支</span>
+  </div>
+
+  <div class="alert ok">
+    <div class="alert-head">全部 5 个 eval 推理脚本已支持 --batch-size 参数</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:.5rem">
+      <tr style="color:var(--text-dim);border-bottom:1px solid var(--border2)">
+        <th style="text-align:left;padding:.25rem .5rem">文件</th>
+        <th style="text-align:left;padding:.25rem .5rem">任务</th>
+        <th style="text-align:center;padding:.25rem .5rem">批推理</th>
+      </tr>
+      <tr><td style="padding:.2rem .5rem"><code>model_vqa_science.py</code></td><td style="padding:.2rem .5rem">ScienceQA</td><td style="text-align:center;color:var(--green)">✓</td></tr>
+      <tr><td style="padding:.2rem .5rem"><code>model_gqa.py</code></td><td style="padding:.2rem .5rem">GQA</td><td style="text-align:center;color:var(--green)">✓</td></tr>
+      <tr><td style="padding:.2rem .5rem"><code>model_text_vqa.py</code></td><td style="padding:.2rem .5rem">TextVQA</td><td style="text-align:center;color:var(--green)">✓</td></tr>
+      <tr><td style="padding:.2rem .5rem"><code>model_vizwiz.py</code></td><td style="padding:.2rem .5rem">VizWiz</td><td style="text-align:center;color:var(--green)">✓</td></tr>
+      <tr><td style="padding:.2rem .5rem"><code>model_ocr_vqa.py</code></td><td style="padding:.2rem .5rem">OCRVQA</td><td style="text-align:center;color:var(--green)">✓</td></tr>
+    </table>
+    <p style="margin-top:.4rem;font-size:11px">
+      默认 batch_size=1（向后兼容）。脚本内置 <code>EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"</code>，可直接覆盖。<br>
+      SciQA 按图像存在性预排序，避免混合批次（image vs text-only）。其余任务全为图像样本。
+    </p>
+  </div>
+
+  <p>核心实现：Left-Padding + 批量 forward</p>
+
+<pre><span class="cm"># 左对齐 padding（生成任务必须 left pad）</span>
+tokenizer.padding_side = <span class="cs">"left"</span>
+
+<span class="cm"># 堆叠图像、left-pad input_ids</span>
+images   = torch.stack([s[<span class="cs">"image_tensor"</span>] <span class="ck">for</span> s <span class="ck">in</span> samples])   <span class="cm"># (B,C,H,W)</span>
+input_ids, attention_mask = _left_pad_batch(samples, tokenizer)    <span class="cm"># (B,L)</span>
+
+<span class="cm"># 单次 model.generate()，处理整个 batch</span>
+<span class="ck">with</span> torch.inference_mode():
+    output_ids = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        images=images,
+        max_new_tokens=args.max_new_tokens,
+        use_cache=<span class="ck">True</span>,
+    )</pre>
+
+  <div class="alert info">
+    <div class="alert-head">Benchmark 结果（GPU 6 单卡，SciQA 200 样本）</div>
+    <div id="bench-results">
+      <table style="width:100%;border-collapse:collapse;margin-top:.6rem;font-size:12px;">
+        <tr style="color:var(--text-dim);border-bottom:1px solid var(--border2)">
+          <th style="text-align:left;padding:.3rem .6rem">batch_size</th>
+          <th style="text-align:right;padding:.3rem .6rem">总耗时</th>
+          <th style="text-align:right;padding:.3rem .6rem">吞吐量</th>
+          <th style="text-align:right;padding:.3rem .6rem">加速比</th>
+        </tr>
+        <tr id="bench-row-1">
+          <td style="padding:.3rem .6rem">1（基准）</td>
+          <td style="text-align:right;padding:.3rem .6rem">284s</td>
+          <td style="text-align:right;padding:.3rem .6rem">0.70 sps</td>
+          <td style="text-align:right;padding:.3rem .6rem;color:var(--text-dim)">1.0×</td>
+        </tr>
+        <tr id="bench-row-4" style="color:var(--green)">
+          <td style="padding:.3rem .6rem">4</td>
+          <td style="text-align:right;padding:.3rem .6rem">111s</td>
+          <td style="text-align:right;padding:.3rem .6rem">1.80 sps</td>
+          <td style="text-align:right;padding:.3rem .6rem;font-weight:700">2.57×</td>
+        </tr>
+        <tr id="bench-row-8" style="color:var(--red)">
+          <td style="padding:.3rem .6rem">8</td>
+          <td style="text-align:right;padding:.3rem .6rem">OOM ✗</td>
+          <td style="text-align:right;padding:.3rem .6rem;font-size:11px">22.4GB + 326MB &gt; 24GB</td>
+          <td style="text-align:right;padding:.3rem .6rem">—</td>
+        </tr>
+        <tr id="bench-row-16" style="color:var(--text-dim)">
+          <td style="padding:.3rem .6rem">16</td>
+          <td style="text-align:right;padding:.3rem .6rem">未测试</td>
+          <td style="text-align:right;padding:.3rem .6rem">—</td>
+          <td style="text-align:right;padding:.3rem .6rem">—</td>
+        </tr>
+      </table>
+      <p style="margin-top:.5rem;font-size:11px;color:var(--text-dim)">
+        注：总耗时包含模型加载（~20s），稳态推理吞吐量更高。<br>
+        <strong>推荐设置：batch_size=4</strong>（在 24GB 卡 + 7B 模型下的最大可行批大小）。<br>
+        OOM 原因：7B 模型占用 22.4GB，仅余 1.6GB 空间，batch=8 需额外 326MB 超出上限。<br>
+        Benchmark 命令：<code>bash scripts/LLaVA/bench_eval_batch.sh 200</code>（GPU 6 单卡）
+      </p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══ P0-2 FLASH ATTENTION + SDPA ═══ -->
+<div id="p0-flash" class="section">
+  <div class="section-header">
+    <span class="section-num">02</span>
+    <h2 class="section-title">Flash Attention — 状态核查 &amp; SDPA 替换 ✓</h2>
+    <span class="priority-tag" style="background:rgba(63,185,80,.15);color:var(--green)">✓ 训练生效 · Eval 修复</span>
+  </div>
+
+  <!-- ── 训练状态 ── -->
+  <div class="alert ok">
+    <div class="alert-head">训练：flash_attn 2.5.6 已生效</div>
+    PyTorch 2.0.1 + CUDA 11.7，<code>flash_attn</code> v2.5.6 已安装。
+    monkey patch 通过 v2 fallback 路径加载 <code>flash_attn_varlen_qkvpacked_func</code>，训练期间 Flash Attention 正常激活。
+  </div>
+
+<pre><span class="cm"># llama_flash_attn_monkey_patch.py — import 路径</span>
+<span class="ck">try</span>:
+    <span class="ck">from</span> <span class="cn">flash_attn.flash_attn_interface</span> <span class="ck">import</span> <span class="cn">flash_attn_unpadded_qkvpacked_func</span>
+    <span class="cm"># v2 无此函数 → ImportError</span>
+<span class="ck">except</span> <span class="cn">ImportError</span>:
+    <span class="ck">from</span> <span class="cn">flash_attn.flash_attn_interface</span> <span class="ck">import</span> \
+        <span class="cn">flash_attn_varlen_qkvpacked_func</span> <span class="ck">as</span> <span class="cn">flash_attn_unpadded_qkvpacked_func</span>
+    <span class="cm"># ↑ 实际走这里，正常工作</span></pre>
+
+  <!-- ── 问题 ── -->
+  <div class="alert warn" style="margin-top:1rem;">
+    <div class="alert-head">⚠️ 原 patch 不支持 Eval Decode</div>
+    <code>flash_attn_varlen_qkvpacked_func</code> 要求 Q/K/V 等长（packed 格式）。
+    训练时 teacher forcing 满足此条件；但 eval autoregressive decode 时 Q_len=1、K/V=完整 KV cache，
+    <code>torch.stack([q, k, v], dim=2)</code> shape 不匹配崩溃。
+    原解法：eval 脚本不加载 monkey patch，单独走 transformers 默认 attention，训练和推理两套不同实现。
+  </div>
+
+  <!-- ── 解决方案 ── -->
+  <div class="alert ok" style="margin-top:1rem;">
+    <div class="alert-head">解决：新建 <code>llama_sdpa_monkey_patch.py</code>，统一训练与推理 attention 实现</div>
+    用 <code>F.scaled_dot_product_attention</code> 替换 packed QKV 路径，三种场景均验证通过：
+  </div>
+
+  <table class="bench-table" style="margin-top:0.6rem;">
+    <thead><tr><th>场景</th><th>描述</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Case A</td><td>预填充，无 padding<br><code>is_causal=True, attn_mask=None</code>（最快路径）</td><td class="good">✓ PASS</td></tr>
+      <tr><td>Case B</td><td>预填充，有 padding mask<br><code>is_causal=False, attn_mask=4D (causal ∩ pad)</code></td><td class="good">✓ PASS</td></tr>
+      <tr><td>Case C</td><td>Eval decode（q_len=1, past_kv=N tokens）<br><code>position_ids</code> 在 forward 内自动生成</td><td class="good">✓ PASS</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:1.2rem;font-size:1rem;">推理速度对比（ScienceQA，batch=1，GPU 0，300 样本）</h3>
+  <table class="bench-table">
+    <thead><tr><th>模式</th><th>吞吐量</th><th>相对</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Baseline（无 patch）</td><td>1.495 sps</td><td>1.00×</td><td>transformers 内置 attention</td></tr>
+      <tr><td>SDPA patch</td><td>1.440 sps</td><td>0.96×</td><td>在噪声范围内，无回退</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top:0.8rem;font-size:0.85rem;color:var(--text-dim)">
+    速度中性（transformers 已内置高效 attention），收益为正确性：消除 eval decode 崩溃，统一训练/推理 attention 路径。<br>
+    文件：<code>ETrain/Train/LLaVA/llama_sdpa_monkey_patch.py</code> ·
+    激活：<code>COIN_USE_SDPA_PATCH=1</code>（eval 脚本，默认关闭）·
+    端到端 smoke test 通过（300 样本）
+  </p>
+</div>
+
+<!-- ═══ P1-2 ZERO3 ═══ -->
+<div id="p1-zero3" class="section">
+  <div class="section-header">
+    <span class="section-num">03</span>
+    <h2 class="section-title">ZeRO-3 Bucket 尺寸调优 — <span style="color:var(--text-dim)">评估后跳过</span></h2>
+    <span class="priority-tag" style="background:rgba(139,148,158,.15);color:var(--text-dim)">⊘ 跳过</span>
+  </div>
+
+  <h3 style="font-size:1rem;margin-bottom:.6rem;">Bucket Size 是什么</h3>
+  <p>
+    ZeRO-3 将模型参数分片到各 GPU，每次 forward 必须先做 <strong>AllGather</strong>
+    把分散的参数片拼回来，用完再丢。AllGather 存在固定启动开销（NCCL kernel launch + PCIe 握手），
+    与数据量无关。
+  </p>
+  <p>
+    <strong>Bucket</strong> 的作用是把多个小 tensor 攒成一大块再统一发送，减少 AllGather/ReduceScatter 的调用次数：
+  </p>
+
+<pre><span class="cm"># 无 bucket（默认极小）：每层单独发，224 次 NCCL 调用</span>
+AllGather(weight_q)  → AllGather(weight_k)  → AllGather(weight_v)  → ...
+
+<span class="cm"># 有 bucket（500MB）：攒满再发，几十次调用</span>
+AllGather(weight_q + weight_k + weight_v + ... 共 500MB)  → ...</pre>
+
+  <p>
+    对应两个配置项：<code>allgather_bucket_size</code>（forward 时收参数）和
+    <code>reduce_bucket_size</code>（backward 时归约梯度）。
+  </p>
+
+  <div class="alert warn" style="margin-top:1rem;">
+    <div class="alert-head">为什么对我们的价值有限</div>
+    <ol style="margin:.4rem 0 0 1.2rem;line-height:1.8;font-size:13px;">
+      <li>
+        <strong>显存余量不够</strong>：GPU 6/7 训练时已在 90%+（~21.6GB），剩余不足 2.4GB。
+        Bucket 是攒满才发的临时显存，200~500MB × 多层并发，很容易触碰 OOM。
+      </li>
+      <li>
+        <strong><code>overlap_comm: true</code> 已是更大的收益</strong>：通信与计算重叠是 ZeRO-3 最核心的优化，
+        已开启。Bucket size 只是在此之上减少 NCCL 调用次数，边际收益小。
+      </li>
+      <li>
+        <strong>LoRA 训练通信量本就少</strong>：Backward ReduceScatter 只处理 LoRA adapter 梯度（rank×dim，远小于 7B），
+        梯度通信本身不是瓶颈。
+      </li>
+      <li>
+        <strong>4 卡 PCIe 环境收益有限</strong>：Bucket 优化在几十卡 NVLink 集群效果显著（调用次数 × 卡数）。
+        4 卡 PCIe，单次 AllGather 启动开销可接受。
+      </li>
+    </ol>
+  </div>
+
+  <div class="alert info" style="margin-top:.8rem;">
+    <div class="alert-head">结论：跳过，不调整 zero3.json</div>
+    风险（OOM）高于预期收益，且更高优先级的优化（向量化、批量推理）已完成。
+    若将来扩展到 NVLink 多机环境，可重新评估。
+  </div>
+</div>
+
+<!-- ═══ P2-1 TORCH.COMPILE ═══ -->
+<div id="p2-compile" class="section">
+  <div class="section-header">
+    <span class="section-num">04</span>
+    <h2 class="section-title">torch.compile Kernel Fusion — <span style="color:var(--text-dim)">评估后跳过</span></h2>
+    <span class="priority-tag" style="background:rgba(139,148,158,.15);color:var(--text-dim)">⊘ 跳过</span>
+  </div>
+
+  <h3 style="font-size:1rem;margin-bottom:.6rem;">torch.compile 是什么</h3>
+  <p>
+    PyTorch 2.0 引入的 JIT 编译器。第一次运行时把 Python 写的 forward 捕获为静态图，做两件事：
+  </p>
+  <ul style="margin:.4rem 0 0 1.2rem;line-height:1.8;font-size:13px;">
+    <li><strong>消除 Python overhead</strong>：后续调用不再走 Python 解释器，绕过 GIL 和 dispatch</li>
+    <li><strong>Kernel fusion</strong>：把相邻的小 kernel（einsum → scaling → sum）合并成 1-2 个大 kernel，减少显存带宽浪费</li>
+  </ul>
+  <p style="margin-top:.6rem;">理论上对 MoELoRA forward 有收益：4 个独立 kernel（matmul A、matmul B、routing weight、scaling）可以 fuse。</p>
+
+  <div class="alert warn" style="margin-top:1rem;">
+    <div class="alert-head">为什么对我们的价值有限</div>
+    <ol style="margin:.4rem 0 0 1.2rem;line-height:1.8;font-size:13px;">
+      <li>
+        <strong>PyTorch 2.0.1 compile 不稳定</strong>：我们用的是 2.0.1，compile 初版。
+        遇到动态 shape、条件分支或外部 hook 时容易静默 fallback 到 eager 模式，等于没编译。
+        稳定可用需要 2.1+。
+      </li>
+      <li>
+        <strong>ZeRO-3 hook 兼容性差</strong>：ZeRO-3 在参数上挂了 AllGather hook，
+        <code>torch.compile</code> 捕获计算图时可能误处理这些 hook，需要
+        <code>fullgraph=False</code> 且大量调试，调试成本高。
+      </li>
+      <li>
+        <strong>LoRA adapter 占训练步比例小</strong>：基础模型 forward（7B）才是计算大头，
+        只 compile adapter 部分收益有上限，实测估计 &lt;5%。
+      </li>
+      <li>
+        <strong>首次编译开销大</strong>：每次 shape 变化重新编译，训练初期会阻塞几分钟。
+      </li>
+    </ol>
+  </div>
+
+  <div class="alert info" style="margin-top:.8rem;">
+    <div class="alert-head">结论：跳过，待升级 PyTorch 后重新评估</div>
+    PyTorch 2.0.1 + ZeRO-3 的组合下，compile 的调试成本远超预期收益。
+    若将来升级到 PyTorch ≥ 2.2，compile 的稳定性和 ZeRO 兼容性均有大幅改善，届时值得重试。
+  </div>
+</div>
+
+<!-- ═══ P2-2 ZERO2 ═══ -->
+<div id="p2-zero2" class="section">
+  <div class="section-header">
+    <span class="section-num">05</span>
+    <h2 class="section-title">ZeRO-2 可行性评估 — <span style="color:var(--red)">不可行（已验证）</span></h2>
+    <span class="priority-tag" style="background:rgba(224,82,82,.15);color:var(--red)">❌ 已排除</span>
+  </div>
+
+  <p>
+    ZeRO-3 每次 forward 都要 AllGather 全部参数（7B × BF16 = 14GB）。
+    ZeRO-2 只 shard 梯度 + 优化器状态，<strong>参数不 shard</strong>，省掉 forward 时的 AllGather。
+  </p>
+
+  <p>内存估算（LoRA 训练，梯度只来自 adapter 参数）：</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>项目</th><th>ZeRO-3（当前）</th><th>ZeRO-2（估算）</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>模型参数（BF16）</td><td>~14GB 分 4 shard → 3.5GB/GPU</td><td>14GB × 每 GPU</td></tr>
+      <tr><td>Gradient（BF16）</td><td>分 4 shard</td><td>分 4 shard</td></tr>
+      <tr><td>Optimizer（FP32，Adam）</td><td>分 4 shard</td><td>分 4 shard</td></tr>
+      <tr><td>Activation（grad ckpt ON）</td><td>~2-4GB</td><td>~2-4GB</td></tr>
+      <tr><td><strong>总峰值估算/GPU</strong></td><td><strong>~20GB ✓</strong></td><td><strong>~22-23GB ⚠️</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="alert critical">
+    <div class="alert-head">🔴 结论：ZeRO-2 不可行 — CPU RAM OOM（已实测，2026-05-29）</div>
+    <p style="font-size:12px;margin:.4rem 0">
+      ZeRO-2 不做参数 offload，但本系统 DeepSpeedCPUAdam 仍需在 CPU RAM 保存优化器状态（FP32 Adam，28GB）。
+      实测：8 进程并发加载时 CPU RAM 需求 <strong>8 × 14GB = 112GB</strong>，
+      而可用 RAM 仅 <strong>83GB</strong>（系统 RAM 125GB 中 42GB 被 OS + 其他进程占用），
+      进程被 OOM killer（SIGKILL -9）终止。
+    </p>
+    <p style="font-size:12px;margin:.3rem 0">
+      <strong>根因：</strong>ZeRO-2 将完整参数驻留在每个 GPU（24GB）+ CPU RAM 存优化器状态，
+      总 CPU 占用超出硬件限制。ZeRO-3 通过参数分片将每 GPU 的 CPU 占用降至 3.5GB，
+      才得以在 83GB RAM 环境下运行。
+    </p>
+    <p style="font-size:11px;color:var(--text-dim);margin:.3rem 0">
+      此结论在 4 卡（GPU 4,5,6,7）和 8 卡配置下均验证失败。ZeRO-2 优化方向正式排除。
+    </p>
+  </div>
+</div>
+
+
+<!-- ═══ P3 EVAL ═══ -->
+<div id="p3-eval" class="section">
+  <div class="section-header">
+    <span class="section-num">06</span>
+    <h2 class="section-title">Eval 加速 — Model Server 复用</h2>
+    <span class="priority-tag p3">📌 P3</span>
+  </div>
+
+  <div class="alert info">
+    <div class="alert-head">当前 eval 流程</div>
+    <code>run_evals_T8.sh</code> 对 8 个任务 <strong>顺序调用</strong>，每次都重新加载 7B 模型 + LoRA 权重（~30-60s 纯加载时间），8 个任务 = 4-8 分钟纯加载开销。
+  </div>
+
+  <p>eval_common.sh 已经做了 GPU 级并行（每 GPU 一个 chunk），但没做 <strong>任务级复用</strong>：</p>
+
+<pre><span class="cm"># 现状：每个 eval task 都冷启动</span>
+<span class="ck">for</span> <span class="cn">TASK</span> <span class="ck">in</span> sqa textqa imagenet ...; <span class="ck">do</span>
+    <span class="cm"># 每次重新 load 7B + LoRA → GPU → run → exit</span>
+    <span class="cn">python</span> -m ETrain.Eval.LLaVA.CoIN.model_vqa_science \
+        --model-path <span class="cs">"$MODELPATH"</span> <span class="cn">...</span>
+<span class="ck">done</span></pre>
+
+  <p><strong>改法（渐进式）</strong>：</p>
+  <ul class="checklist">
+    <li>
+      <span class="check-icon" style="color:var(--amber)">→</span>
+      <span><strong>短期</strong>：把 8 个 eval 脚本合并为一个 Python 进程，按顺序切换 dataset，模型只 load 一次。改动小，收益稳定。</span>
+    </li>
+    <li>
+      <span class="check-icon" style="color:var(--amber)">→</span>
+      <span><strong>中期</strong>：用 vLLM 或 lmdeploy 起 inference server，eval 脚本改为发 HTTP 请求。吞吐量 5-10x 提升，支持连续 batching。</span>
+    </li>
+    <li>
+      <span class="check-icon" style="color:var(--text-dim)">→</span>
+      <span><strong>长期</strong>：SGLang（LLaVA 支持好）+ 多 GPU tensor parallel，全量 8 任务评估从小时级降到分钟级。</span>
+    </li>
+  </ul>
+</div>
+
+
+</main>
+</div>
+
+<footer>
+  <span>CoIN · MoELoRA · 性能分析报告 · 最后更新 2026-05-29</span>
+  <span>向量化推理 1.48～1.61× ✓ · Eval 批量推理 2.57× ✓ · SDPA patch ✓（eval decode 修复）· 训练向量化 ~1.0× · ZeRO-2 OOM 已排除</span>
+</footer>
+
+<script>
+// Active nav on scroll
+const sections = document.querySelectorAll('.section[id], [id="overview"], [id="memory"]');
+const navItems = document.querySelectorAll('.nav-item');
+
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navItems.forEach(n => {
+        n.classList.toggle('active', n.getAttribute('href') === '#' + e.target.id);
+      });
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+
+document.querySelectorAll('[id]').forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

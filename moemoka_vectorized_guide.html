@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoEMoKA 向量化 Forward — 技术讲解</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0b0d0f;--bg2:#111417;--bg3:#171b1f;--border:#1e2328;--border2:#252a30;
+    --text:#c8d0d8;--text-dim:#5a6370;--text-mid:#8c97a4;
+    --amber:#f0a500;--amber-dim:#7a5200;--red:#e05252;
+    --green:#3fb950;--blue:#58a6ff;--purple:#bc8cff;--cyan:#39c5cf;--orange:#f0883e;
+    --mono:'JetBrains Mono',monospace;--sans:'Syne',sans-serif;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.7;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px)}
+  header{position:sticky;top:0;z-index:100;background:rgba(11,13,15,.94);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--border);padding:0 2rem;
+    display:flex;align-items:center;justify-content:space-between;height:52px}
+  .logo{font-family:var(--sans);font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--orange)}
+  .header-title{font-size:12px;color:var(--text-mid);letter-spacing:.04em}
+  .header-meta{font-size:11px;color:var(--text-dim)}
+  .layout{display:grid;grid-template-columns:230px 1fr;min-height:calc(100vh - 52px);position:relative;z-index:1}
+  aside{border-right:1px solid var(--border);padding:2rem 0;position:sticky;top:52px;
+    height:calc(100vh - 52px);overflow-y:auto}
+  .nav-section{margin-bottom:1.8rem}
+  .nav-label{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--text-dim);padding:0 1.5rem;margin-bottom:.5rem}
+  .nav-item{display:flex;align-items:center;gap:.6rem;padding:.35rem 1.5rem;font-size:12px;color:var(--text-mid);
+    text-decoration:none;border-left:2px solid transparent;transition:all .15s}
+  .nav-item:hover{color:var(--text);background:var(--bg2);border-left-color:var(--border2)}
+  .nav-item.active{color:var(--orange);border-left-color:var(--orange);background:rgba(240,136,62,.06)}
+  main{padding:3rem 3.5rem;max-width:900px}
+  .hero{margin-bottom:3rem}
+  .hero-eyebrow{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.8rem}
+  .hero-title{font-family:var(--sans);font-size:32px;font-weight:800;line-height:1.1;color:#e8edf2;margin-bottom:1rem}
+  .hero-title span{color:var(--orange)}
+  .hero-desc{font-size:13px;color:var(--text-mid);max-width:580px;line-height:1.8}
+  .section{margin-bottom:3.5rem}
+  .section-header{display:flex;align-items:baseline;gap:1rem;margin-bottom:1.5rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
+  .section-num{font-size:10px;letter-spacing:.15em;color:var(--text-dim)}
+  .section-title{font-family:var(--sans);font-size:18px;font-weight:700;color:#dde4ec}
+  p{font-size:13px;color:var(--text);line-height:1.8;margin-bottom:.9rem}
+  strong{color:#e8edf2;font-weight:600}
+  em{color:var(--orange);font-style:normal}
+  pre{background:#0d1117;border:1px solid var(--border2);padding:1.1rem 1.3rem;overflow-x:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.7;margin:.8rem 0 1.2rem;position:relative}
+  .pre-label{position:absolute;top:0;right:0;font-size:10px;color:var(--text-dim);background:var(--bg3);
+    padding:2px 8px;border-bottom-left-radius:4px;letter-spacing:.08em}
+  code{font-family:var(--mono);font-size:12px}
+  .cm{color:#5a6c7d}.ck{color:#ff7b72}.cs{color:#a5d6ff}.cn{color:#79c0ff}.co{color:#ffa657}
+  .cp{color:var(--purple)}.cc{color:var(--cyan)}
+  .hl {background:rgba(240,136,62,.10);display:block;margin:0 -1.3rem;padding:0 1.3rem}
+  .hl2{background:rgba(63,185,80,.08);display:block;margin:0 -1.3rem;padding:0 1.3rem}
+  .hl3{background:rgba(88,166,255,.08);display:block;margin:0 -1.3rem;padding:0 1.3rem}
+  .alert{border-left:3px solid;padding:1rem 1.2rem;margin-bottom:1.2rem;background:var(--bg2);font-size:13px;line-height:1.65}
+  .alert.ok{border-color:var(--green);background:rgba(63,185,80,.06)}
+  .alert.info{border-color:var(--blue);background:rgba(88,166,255,.06)}
+  .alert.warn{border-color:var(--orange);background:rgba(240,136,62,.06)}
+  .alert.purple{border-color:var(--purple);background:rgba(188,140,255,.06)}
+  .alert-head{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:.4rem}
+  .alert.ok .alert-head{color:var(--green)}.alert.info .alert-head{color:var(--blue)}
+  .alert.warn .alert-head{color:var(--orange)}.alert.purple .alert-head{color:var(--purple)}
+  .table-wrap{overflow-x:auto;margin-bottom:1.5rem}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{background:var(--bg3);color:var(--text-dim);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+    padding:.6rem 1rem;text-align:left;border-bottom:1px solid var(--border2)}
+  td{padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .shape-flow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.8rem 0 1.2rem;font-size:12px}
+  .shape{background:var(--bg3);border:1px solid var(--border2);padding:.3rem .7rem;border-radius:4px;font-weight:600;color:var(--text)}
+  .shape.amber{border-color:var(--amber-dim);color:var(--amber);background:rgba(240,165,0,.08)}
+  .shape.blue{border-color:#1e3a5f;color:var(--blue);background:rgba(88,166,255,.08)}
+  .shape.green{border-color:#1a3a1f;color:var(--green);background:rgba(63,185,80,.08)}
+  .shape.purple{border-color:#3a2a5f;color:var(--purple);background:rgba(188,140,255,.08)}
+  .shape.orange{border-color:#5a3010;color:var(--orange);background:rgba(240,136,62,.08)}
+  .arrow{color:var(--text-dim);font-size:14px}
+  .idx-table{display:grid;grid-template-columns:auto auto 1fr;gap:.3rem .8rem;font-size:12px;margin:.6rem 0 1rem}
+  .idx-char{font-weight:700;color:var(--cyan);font-size:14px;text-align:center}
+  .idx-size{color:var(--orange);font-weight:600}
+  .idx-desc{color:var(--text-mid)}
+  .compare{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);border:1px solid var(--border);margin-bottom:1.5rem}
+  .compare-col{background:var(--bg2);padding:1rem 1.2rem}
+  .compare-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.6rem;font-weight:700}
+  .compare-label.bad{color:var(--red)}.compare-label.good{color:var(--green)}
+  .filepath{display:inline-flex;align-items:center;gap:.5rem;background:var(--bg3);border:1px solid var(--border2);
+    padding:.3rem .8rem;border-radius:4px;font-size:11.5px;color:var(--text-mid);margin-bottom:.6rem}
+  .filepath code{color:var(--cyan)}
+  footer{border-top:1px solid var(--border);padding:1.5rem 3.5rem;font-size:11px;color:var(--text-dim);
+    display:flex;justify-content:space-between;align-items:center;position:relative;z-index:1}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  .section{animation:fadeUp .4s ease both}
+  .section:nth-child(1){animation-delay:.05s}.section:nth-child(2){animation-delay:.10s}
+  .section:nth-child(3){animation-delay:.15s}.section:nth-child(4){animation-delay:.20s}
+  .section:nth-child(5){animation-delay:.25s}.section:nth-child(6){animation-delay:.30s}
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+  h3{font-family:var(--sans);font-size:15px;font-weight:700;color:#c8d4e0;margin:1.4rem 0 .6rem}
+  ul,ol{padding-left:1.4rem;margin-bottom:.9rem}
+  li{font-size:13px;color:var(--text);line-height:1.8;margin-bottom:.2rem}
+</style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex;align-items:center;gap:1rem">
+    <span class="logo">CoIN · MoEMoKA</span>
+    <span style="color:var(--border2)">/</span>
+    <span class="header-title">向量化 Forward 技术讲解</span>
+  </div>
+  <span class="header-meta">MoEMoKA 分支 · 2026-06-05</span>
+</header>
+
+<div class="layout">
+<aside>
+  <div class="nav-section">
+    <div class="nav-label">总览</div>
+    <a class="nav-item active" href="#arch">架构总览</a>
+    <a class="nav-item" href="#location">代码位置</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">核心实现</div>
+    <a class="nav-item" href="#loop">原始 Loop 实现</a>
+    <a class="nav-item" href="#vectorized">向量化实现</a>
+    <a class="nav-item" href="#cross-attn">Cross-Attention 优化</a>
+    <a class="nav-item" href="#einsum">einsum 符号详解</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">深入理解</div>
+    <a class="nav-item" href="#vs-moelora">与 MoELoRA 对比</a>
+    <a class="nav-item" href="#shapes">完整 shape 推导</a>
+    <a class="nav-item" href="#perf">性能分析</a>
+  </div>
+</aside>
+
+<main>
+
+<div class="hero">
+  <div class="hero-eyebrow">// 技术原理 · 代码精读 · 工程分析</div>
+  <h1 class="hero-title">MoEMoKA 向量化 Forward<br><span>Expert Loop → einsum + 跨专家 Cross-Attn</span></h1>
+  <p class="hero-desc">
+    MoE-MoKA 在 MoE-LoRA 基础上引入了模态特定 A 矩阵和跨模态 Cross-Attention。原始实现对 N=8 个专家逐一串行计算，
+    造成 8× Python dispatch + 8× 小矩阵乘法开销。向量化后，专家维度通过 einsum 融合，Cross-Attention 同时处理所有专家。
+  </p>
+</div>
+
+<!-- ───────────────────────── 01 架构总览 ───────────────────────── -->
+<div id="arch" class="section">
+  <div class="section-header">
+    <span class="section-num">01</span>
+    <h2 class="section-title">架构总览 — MoEMoKA 与 MoELoRA 的区别</h2>
+  </div>
+
+  <p>MoELoRA 每个专家只有一个 A 矩阵（对所有 token 共用）；MoEMoKA 每个专家有 <em>两个</em> A 矩阵，分别处理文本 token 和视觉 token：</p>
+
+  <div class="table-wrap">
+  <table>
+    <tr><th>组件</th><th>MoELoRA</th><th>MoEMoKA</th></tr>
+    <tr>
+      <td>A 矩阵</td>
+      <td>单个 <code>W_A_i</code>，处理全部 token</td>
+      <td><code>A_text_i</code> 处理文本 token，<code>A_vis_i</code> 处理视觉 token</td>
+    </tr>
+    <tr>
+      <td>B 矩阵</td>
+      <td>每专家独立 <code>B_i</code></td>
+      <td>每专家独立 <code>B_i</code>（相同）</td>
+    </tr>
+    <tr>
+      <td>Cross-Attention</td>
+      <td>无</td>
+      <td>视觉 token 以文本 token 为 K/V，在 rank-r 空间做注意力</td>
+    </tr>
+    <tr>
+      <td>Forward 公式</td>
+      <td><code>ΔW·x = B·Σᵢ wᵢ·(Aᵢ·x)·s</code></td>
+      <td><code>ΔW·x = Σᵢ wᵢ·Bᵢ·[Aᵢᵗ·xᵗ ; Aᵢᵛ·xᵛ + Att(Aᵢᵛ·xᵛ, Aᵢᵗ·xᵗ)]·s</code></td>
+    </tr>
+    <tr>
+      <td>过文本化修复</td>
+      <td>否（梯度仍共享 A）</td>
+      <td>是（A_text/A_vis 独立，梯度不互相污染）</td>
+    </tr>
+  </table>
+  </div>
+
+  <p>Token mask 编码：<code>2</code> = 文本，<code>1</code> = 视觉，<code>0</code> = padding（始终排除）。</p>
+</div>
+
+<!-- ───────────────────────── 02 代码位置 ───────────────────────── -->
+<div id="location" class="section">
+  <div class="section-header">
+    <span class="section-num">02</span>
+    <h2 class="section-title">代码位置</h2>
+  </div>
+
+  <div class="filepath"><span class="icon">📄</span><code>CoIN/peft/tuners/mokamoelora.py</code></div>
+
+  <div class="table-wrap">
+  <table>
+    <tr><th>函数</th><th>行（大约）</th><th>作用</th></tr>
+    <tr><td><code>MoEMoKALoraLinear.forward()</code></td><td>213</td><td>入口：mask 解析、router、调用向量化核心</td></tr>
+    <tr><td><code>MoEMoKALoraLinear._lora_vectorized()</code></td><td>273</td><td>核心：stack weights → einsum 替换 N 次 for loop</td></tr>
+    <tr><td><code>MoEMoKALoraLinear._cross_attention_vec()</code></td><td>331</td><td>Cross-Attention：batch loop 保留，但 N 专家同时计算</td></tr>
+  </table>
+  </div>
+
+  <div class="alert info">
+    <div class="alert-head">对比参考</div>
+    MoELoRA 的向量化实现位于 <code>CoIN/peft/tuners/coinmoelora.py</code> 的 <code>_lora_vectorized()</code>，
+    可对照理解。MoEMoKA 的向量化在此基础上额外处理了模态分离和 Cross-Attention。
+  </div>
+</div>
+
+<!-- ───────────────────────── 03 原始 Loop 实现 ───────────────────────── -->
+<div id="loop" class="section">
+  <div class="section-header">
+    <span class="section-num">03</span>
+    <h2 class="section-title">原始 Loop 实现 — 问题在哪里</h2>
+  </div>
+
+  <pre><span class="pre-label">mokamoelora.py · 旧版（已替换）</span><span class="cm"># 对 N=8 个专家逐一串行执行</span>
+<span class="ck">for</span> i, expert <span class="ck">in</span> <span class="cn">enumerate</span>(self.lora_experts[adapter]):
+    r_per = expert.lora_A_text.out_features
+
+    <span class="cm"># 分别调用两个 A 矩阵 → 2 次小 CUDA kernel</span>
+    out_text = expert.lora_A_text(flat_text)   <span class="cm"># (n_text, r_per)</span>
+    out_vis  = expert.lora_A_vis(flat_vis)     <span class="cm"># (n_vis,  r_per)</span>
+
+    a_comb = torch.<span class="cn">zeros</span>(B, S, r_per, ...)
+    <span class="ck">if</span> has_text: a_comb[text_mask] = out_text
+    <span class="ck">if</span> has_vis:
+        <span class="ck">if</span> has_text:
+            out_vis = self._cross_attention(out_vis, out_text, ...)
+        a_comb[vis_mask] = out_vis
+
+    out_i = expert.lora_B(a_comb)             <span class="cm"># (B, S, d_out)</span>
+<span class="hl">    expert_sum += router_weights[:,:,i].unsqueeze(-1) * out_i  <span class="cm"># 累加</span></span></pre>
+
+  <p><strong>开销分析：</strong></p>
+  <ul>
+    <li>每次循环：2 次 A-forward（各自 1 次 CUDA kernel）+ 1 次 B-forward = <strong>3× kernel launch × 8 专家 = 24 次小 kernel</strong></li>
+    <li>Cross-Attention：<em>每个专家独立调用</em> <code>_cross_attention()</code>，内部还有 batch 维度的 Python for loop</li>
+    <li>每次 kernel launch 有 ~10-20μs 固定开销，24 次 = 约 240-480μs 纯 overhead</li>
+    <li>8 个 <code>a_comb</code> 临时张量的 alloc/free 各自独立，显存碎片化</li>
+  </ul>
+</div>
+
+<!-- ───────────────────────── 04 向量化实现 ───────────────────────── -->
+<div id="vectorized" class="section">
+  <div class="section-header">
+    <span class="section-num">04</span>
+    <h2 class="section-title">向量化实现 — _lora_vectorized()</h2>
+  </div>
+
+  <pre><span class="pre-label">mokamoelora.py · _lora_vectorized()</span><span class="cm"># 1. 一次性 stack 所有专家的权重</span>
+<span class="hl">A_text = torch.<span class="cn">stack</span>([e.lora_A_text.weight <span class="ck">for</span> e <span class="ck">in</span> experts], dim=0)  <span class="cm"># (N, r_per, d_in)</span></span>
+<span class="hl">A_vis  = torch.<span class="cn">stack</span>([e.lora_A_vis.weight  <span class="ck">for</span> e <span class="ck">in</span> experts], dim=0)  <span class="cm"># (N, r_per, d_in)</span></span>
+<span class="hl">B_all  = torch.<span class="cn">stack</span>([e.lora_B.weight       <span class="ck">for</span> e <span class="ck">in</span> experts], dim=0)  <span class="cm"># (N, d_out, r_per)</span></span>
+
+<span class="cm"># 2. 所有专家同时计算 A·x（1 次 einsum 替代 N 次 matmul）</span>
+<span class="hl2">out_text_N = torch.<span class="cn">einsum</span>(<span class="cs">'td,nrd->tnr'</span>, flat_text, A_text)  <span class="cm"># (n_text, N, r_per)</span></span>
+<span class="hl2">out_vis_N  = torch.<span class="cn">einsum</span>(<span class="cs">'vd,nrd->vnr'</span>, flat_vis,  A_vis)   <span class="cm"># (n_vis,  N, r_per)</span></span>
+
+<span class="cm"># 3. Cross-Attention：batch loop 保留，但 N 专家同时处理</span>
+<span class="ck">if</span> has_vis <span class="ck">and</span> has_text:
+    out_vis_N = self._cross_attention_vec(out_vis_N, out_text_N, ...)
+
+<span class="cm"># 4. Scatter 到 (B, S, N, r_per) 再一次性过 B</span>
+a_comb = torch.<span class="cn">zeros</span>(B, S, N, r_per, ...)
+<span class="ck">if</span> has_text: a_comb[text_mask] = out_text_N
+<span class="ck">if</span> has_vis:  a_comb[vis_mask]  = out_vis_N
+<span class="hl2">out_all = torch.<span class="cn">einsum</span>(<span class="cs">'bsnr,nor->bsno'</span>, a_comb, B_all)  <span class="cm"># (B, S, N, d_out)</span></span>
+
+<span class="cm"># 5. Router 加权求和</span>
+<span class="hl2"><span class="ck">return</span> (router_weights.unsqueeze(-1) * out_all).sum(dim=2)  <span class="cm"># (B, S, d_out)</span></span></pre>
+
+  <p>kernel 次数从 <strong>24 次</strong> 降到 <strong>3-4 次</strong>（stack、2 × einsum、B einsum）。</p>
+</div>
+
+<!-- ───────────────────────── 05 Cross-Attention 优化 ───────────────────────── -->
+<div id="cross-attn" class="section">
+  <div class="section-header">
+    <span class="section-num">05</span>
+    <h2 class="section-title">Cross-Attention 优化 — _cross_attention_vec()</h2>
+  </div>
+
+  <p>Cross-Attention 存在 <strong>batch 维度的 Python for loop</strong>（每个样本的视觉/文本 token 数量不同，无法直接 pad-free 向量化）。
+  原始版本在循环内对每个专家独立计算；向量化版本在循环内 <em>同时处理所有 N 专家</em>：</p>
+
+  <div class="compare">
+    <div class="compare-col">
+      <div class="compare-label bad">旧版：每专家独立注意力</div>
+      <pre style="margin:0;font-size:11.5px"><span class="ck">for</span> b <span class="ck">in</span> range(batch_size):
+    q  = query[v0:v0+nv]  <span class="cm"># (nv, r_per)</span>
+    kv = key_val[t0:t0+nt] <span class="cm"># (nt, r_per)</span>
+    <span class="cm"># 单专家 attention</span>
+    score = q @ kv.T / sqrt(r)  <span class="cm"># (nv, nt)</span>
+    attn  = softmax(score)
+    out   = q + attn @ kv  <span class="cm"># (nv, r_per)</span>
+
+<span class="cm"># 调用 N 次（8× for loop 外层）</span></pre>
+    </div>
+    <div class="compare-col">
+      <div class="compare-label good">新版：N 专家同时计算</div>
+      <pre style="margin:0;font-size:11.5px"><span class="ck">for</span> b <span class="ck">in</span> range(batch_size):
+    q  = query  [v0:v0+nv]  <span class="cm"># (nv, N, r_per)</span>
+    kv = key_val[t0:t0+nt]  <span class="cm"># (nt, N, r_per)</span>
+    <span class="cm"># 所有专家一次 einsum</span>
+    sc = einsum(<span class="cs">'vnr,tnr->vtn'</span>, q, kv) <span class="cm"># (nv,nt,N)</span>
+    at = softmax(sc, dim=1)
+    up = einsum(<span class="cs">'vtn,tnr->vnr'</span>, at, kv) <span class="cm"># (nv,N,r)</span>
+
+<span class="cm"># batch loop 不可消除（可变长度）</span></pre>
+    </div>
+  </div>
+
+  <div class="alert warn">
+    <div class="alert-head">为什么 batch loop 无法消除</div>
+    每个样本的文本 token 数（n_text）和视觉 token 数（n_vis）不同，flat_text/flat_vis 是将 batch 中所有样本 concat 后的结果。
+    若要向量化 batch 维度，需要 padding + attention mask，实现更复杂，且 B=1（训练时每卡 batch=4~8）时收益有限。
+    当前方案（batch loop + N 专家 einsum）已消除主要瓶颈。
+  </div>
+</div>
+
+<!-- ───────────────────────── 06 einsum 符号详解 ───────────────────────── -->
+<div id="einsum" class="section">
+  <div class="section-header">
+    <span class="section-num">06</span>
+    <h2 class="section-title">einsum 符号详解</h2>
+  </div>
+
+  <h3>索引含义</h3>
+  <div class="idx-table">
+    <span class="idx-char">b</span><span class="idx-size">B</span><span class="idx-desc">batch size（训练时 = per_device_train_batch_size）</span>
+    <span class="idx-char">s</span><span class="idx-size">S</span><span class="idx-desc">序列长度（text + visual + pad，完整长度）</span>
+    <span class="idx-char">t</span><span class="idx-size">n_text</span><span class="idx-desc">gather 后的文本 token 总数（flat，已去 pad）</span>
+    <span class="idx-char">v</span><span class="idx-size">n_vis</span><span class="idx-desc">gather 后的视觉 token 总数（flat，已去 pad）</span>
+    <span class="idx-char">n</span><span class="idx-size">N=8</span><span class="idx-desc">专家数量</span>
+    <span class="idx-char">r</span><span class="idx-size">r_per</span><span class="idx-desc">每专家的 rank（= total_r / N = 32/8 = 4）</span>
+    <span class="idx-char">d</span><span class="idx-size">d_in</span><span class="idx-desc">输入维度（LLaMA-7B: 4096）</span>
+    <span class="idx-char">o</span><span class="idx-size">d_out</span><span class="idx-desc">输出维度（通常 = d_in）</span>
+  </div>
+
+  <h3>逐步推导</h3>
+
+  <pre><span class="pre-label">Step 1 · 文本 token 过 A_text（所有专家）</span><span class="cm"># flat_text:  (n_text, d_in)   — 所有文本 token，已 gather
+# A_text:     (N, r_per, d_in) — N 个专家的 A_text 矩阵</span>
+
+out_text_N = torch.einsum(<span class="cs">'td,nrd->tnr'</span>, flat_text, A_text)
+<span class="cm">#   t: n_text token 位置
+#   d: 输入维度（求和/缩并）
+#   n: 专家维度（保留）
+#   r: rank 维度（保留）
+#   输出 (n_text, N, r_per)：每个 token 在每个专家中的低秩表示</span></pre>
+
+  <pre><span class="pre-label">Step 2 · 视觉 token 过 A_vis（所有专家）</span>out_vis_N = torch.einsum(<span class="cs">'vd,nrd->vnr'</span>, flat_vis, A_vis)
+<span class="cm">#   v: n_vis token 位置
+#   输出 (n_vis, N, r_per)</span></pre>
+
+  <pre><span class="pre-label">Step 3 · Cross-Attention（per batch sample，all N experts）</span><span class="cm"># scores: 视觉 token 对文本 token 的注意力分数（所有专家）</span>
+scores = torch.einsum(<span class="cs">'vnr,tnr->vtn'</span>, q, kv)
+<span class="cm">#   v: n_vis，t: n_text → (n_vis, n_text, N) 每专家独立的注意力矩阵
+# update: attn 加权后的文本信息注入视觉 token
+</span>update = torch.einsum(<span class="cs">'vtn,tnr->vnr'</span>, attn, kv)
+<span class="cm">#   vt→v: 对 n_text 维加权聚合（softmax 后已归一化）</span></pre>
+
+  <pre><span class="pre-label">Step 4 · 所有专家过 B（一次 einsum）</span><span class="cm"># a_comb: (B, S, N, r_per) — 已 scatter 回全序列
+# B_all:  (N, d_out, r_per)</span>
+out_all = torch.einsum(<span class="cs">'bsnr,nor->bsno'</span>, a_comb, B_all)
+<span class="cm">#   r: rank 维（求和/缩并）
+#   输出 (B, S, N, d_out)：每个位置、每个专家的输出</span>
+
+<span class="cm"># Router 加权求和 → (B, S, d_out)</span>
+result  = (router_weights.unsqueeze(-1) * out_all).sum(dim=2)</pre>
+</div>
+
+<!-- ───────────────────────── 07 与 MoELoRA 对比 ───────────────────────── -->
+<div id="vs-moelora" class="section">
+  <div class="section-header">
+    <span class="section-num">07</span>
+    <h2 class="section-title">与 MoELoRA 向量化的对比</h2>
+  </div>
+
+  <div class="table-wrap">
+  <table>
+    <tr><th>维度</th><th>MoELoRA (_lora_vectorized)</th><th>MoEMoKA (_lora_vectorized)</th></tr>
+    <tr>
+      <td>A 矩阵</td>
+      <td>单个 <code>A (N,r,d)</code></td>
+      <td>两个：<code>A_text (N,r,d)</code> + <code>A_vis (N,r,d)</code></td>
+    </tr>
+    <tr>
+      <td>A 的 einsum</td>
+      <td><code>'bti,nri->btnr'</code>（全 token）</td>
+      <td><code>'td,nrd->tnr'</code>（文本） + <code>'vd,nrd->vnr'</code>（视觉）</td>
+    </tr>
+    <tr>
+      <td>B 的 einsum</td>
+      <td><code>'btnr,nor->btno'</code></td>
+      <td><code>'bsnr,nor->bsno'</code>（等价，形状相同）</td>
+    </tr>
+    <tr>
+      <td>额外操作</td>
+      <td>无</td>
+      <td>Cross-Attention（batch loop + 2 einsum）</td>
+    </tr>
+    <tr>
+      <td>torch.compile</td>
+      <td>可选（<code>COIN_USE_COMPILED_LORA</code>）</td>
+      <td>未添加（ZeRO-3 hook 兼容性待评估）</td>
+    </tr>
+    <tr>
+      <td>kernel 次数（N=8）</td>
+      <td>原 16 → 优化后 2</td>
+      <td>原 24 → 优化后 3-4</td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="alert ok">
+    <div class="alert-head">验证结果</div>
+    smoke test：forward shape = (1,10,64) ✓，backward 无报错 ✓，loss 数值正常 ✓。
+    实际训练：T1 ScienceQA 重启后观察 step 时间变化（旧版 ~223s/step，预期优化后 ~100-140s/step）。
+  </div>
+</div>
+
+<!-- ───────────────────────── 08 shape 推导 ───────────────────────── -->
+<div id="shapes" class="section">
+  <div class="section-header">
+    <span class="section-num">08</span>
+    <h2 class="section-title">完整 Shape 推导（r=32, N=8, r_per=4）</h2>
+  </div>
+
+  <div class="shape-flow">
+    <div class="shape blue">flat_text<br><small>(n_t, 4096)</small></div>
+    <span class="arrow">×</span>
+    <div class="shape orange">A_text<br><small>(8, 4, 4096)</small></div>
+    <span class="arrow">→</span>
+    <div class="shape purple">out_text_N<br><small>(n_t, 8, 4)</small></div>
+  </div>
+
+  <div class="shape-flow">
+    <div class="shape orange">flat_vis<br><small>(n_v, 4096)</small></div>
+    <span class="arrow">×</span>
+    <div class="shape orange">A_vis<br><small>(8, 4, 4096)</small></div>
+    <span class="arrow">→</span>
+    <div class="shape">out_vis_N<br><small>(n_v, 8, 4)</small></div>
+    <span class="arrow">+CrossAttn→</span>
+    <div class="shape green">out_vis_N'<br><small>(n_v, 8, 4)</small></div>
+  </div>
+
+  <div class="shape-flow">
+    <div class="shape">a_comb<br><small>(B, S, 8, 4)</small></div>
+    <span class="arrow">×</span>
+    <div class="shape amber">B_all<br><small>(8, 4096, 4)</small></div>
+    <span class="arrow">→</span>
+    <div class="shape blue">out_all<br><small>(B, S, 8, 4096)</small></div>
+    <span class="arrow">×w→</span>
+    <div class="shape green">expert_sum<br><small>(B, S, 4096)</small></div>
+  </div>
+
+  <p>参数规模（r=32, N=8, d=4096, ScienceQA r_per=4）：</p>
+  <ul>
+    <li>每专家：A_text + A_vis + B = 2×(4×4096) + 1×(4096×4) = 2×16384 + 16384 = <strong>49,152</strong> 参数</li>
+    <li>8 专家合计：49,152 × 8 = <strong>393,216</strong> 参数/层</li>
+    <li>7B 模型 224 层：约 <strong>88M</strong> 可训练参数（占总参数约 1.25%）</li>
+  </ul>
+</div>
+
+<!-- ───────────────────────── 09 性能分析 ───────────────────────── -->
+<div id="perf" class="section">
+  <div class="section-header">
+    <span class="section-num">09</span>
+    <h2 class="section-title">性能分析与下一步优化建议</h2>
+  </div>
+
+  <h3>已完成的优化</h3>
+  <div class="table-wrap">
+  <table>
+    <tr><th>优化项</th><th>实施状态</th><th>原理</th></tr>
+    <tr>
+      <td>Expert loop → einsum</td>
+      <td><span style="color:var(--green)">✓ 已实施</span></td>
+      <td>N=8 串行 dispatch → 2 batched einsum kernel</td>
+    </tr>
+    <tr>
+      <td>Cross-Attn N 专家向量化</td>
+      <td><span style="color:var(--green)">✓ 已实施</span></td>
+      <td>batch loop 内 N 专家同时 einsum（<code>vtn,tnr→vnr</code>）</td>
+    </tr>
+    <tr>
+      <td>Eval batch inference</td>
+      <td><span style="color:var(--green)">✓ 已实施</span></td>
+      <td><code>COIN_EVAL_BATCH_SIZE=4</code>，6 个 eval 脚本已更新</td>
+    </tr>
+    <tr>
+      <td>SDPA 替换 Flash Attention</td>
+      <td><span style="color:var(--green)">✓ 已实施</span></td>
+      <td><code>COIN_USE_SDPA_PATCH=1</code>，含左 padding NaN 修复</td>
+    </tr>
+  </table>
+  </div>
+
+  <h3>评估后跳过的优化</h3>
+  <div class="table-wrap">
+  <table>
+    <tr><th>优化项</th><th>状态</th><th>原因</th></tr>
+    <tr>
+      <td><code>torch.compile</code></td>
+      <td><span style="color:var(--text-dim)">跳过</span></td>
+      <td>PyTorch 2.0.1 compile 不稳定；ZeRO-3 backward hook 兼容性差；升级到 ≥ 2.2 后重评估</td>
+    </tr>
+    <tr>
+      <td>Cross-Attn batch loop 消除</td>
+      <td><span style="color:var(--text-dim)">跳过</span></td>
+      <td>需 padding + attention mask；B=1 收益有限；主要瓶颈（expert loop）已消除</td>
+    </tr>
+    <tr>
+      <td>ZeRO-3 bucket 调优</td>
+      <td><span style="color:var(--text-dim)">跳过</span></td>
+      <td>4 卡 PCIe 环境收益有限；OOM 风险 > 收益；参考 MoELoRA 分析结论</td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="alert purple">
+    <div class="alert-head">预期加速</div>
+    MoELoRA 向量化后实测 1.48~1.61× 加速。MoEMoKA 额外有 Cross-Attention 开销（batch loop 保留），
+    预期加速比略低于 MoELoRA，估计 <strong>1.3~1.5×</strong>。
+    T1 ScienceQA 旧版 ~223s/step → 预期 ~150~170s/step。具体数值以实测为准。
+  </div>
+</div>
+
+</main>
+</div>
+
+<footer>
+  <span>CoIN · MoEMoKA 向量化 Forward · 2026-06-05</span>
+  <span>commit d37b94d · mokamoelora.py</span>
+</footer>
+
+</body>
+</html>

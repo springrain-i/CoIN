@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoELoRA 梯度主导分析 · 完整技术文档</title>
+<style>
+  :root {
+    --bg:#0d1117;--bg2:#161b22;--bg3:#1f2937;--border:#30363d;
+    --text:#c9d1d9;--dim:#6e7681;--blue:#58a6ff;--orange:#f0883e;
+    --green:#3fb950;--purple:#bc8cff;--yellow:#e3b341;--red:#f85149;
+    --mono:'JetBrains Mono','Fira Code',monospace;
+    --sans:-apple-system,'Segoe UI',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);
+       font-size:14px;line-height:1.7;padding:2rem;max-width:980px;margin:0 auto}
+  h1{font-size:1.7rem;color:#fff;margin-bottom:.3rem}
+  h2{font-size:1.1rem;color:var(--blue);margin:2rem 0 .6rem;
+     border-bottom:1px solid var(--border);padding-bottom:.3rem}
+  h3{font-size:.95rem;color:var(--yellow);margin:1.2rem 0 .4rem}
+  h4{font-size:.88rem;color:var(--purple);margin:.8rem 0 .3rem}
+  p{margin-bottom:.7rem;color:var(--text)}
+  .sub{color:var(--dim);font-size:.85rem;margin-bottom:1.5rem}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+        padding:1.2rem;margin:.8rem 0}
+  .code{font-family:var(--mono);font-size:.82rem;background:var(--bg3);
+        border-left:3px solid var(--purple);padding:.7rem 1rem;
+        border-radius:0 5px 5px 0;margin:.7rem 0;white-space:pre;overflow-x:auto}
+  .code-file{font-family:var(--mono);font-size:.8rem;background:#0a0f17;
+             border:1px solid var(--border);border-top:2px solid var(--blue);
+             padding:.8rem 1rem;border-radius:4px;margin:.7rem 0;
+             white-space:pre;overflow-x:auto}
+  .file-header{font-family:var(--mono);font-size:.78rem;color:var(--blue);
+               background:var(--bg3);padding:.25rem .7rem;border-radius:4px 4px 0 0;
+               margin-bottom:0;display:inline-block}
+  .tag{display:inline-block;padding:.15rem .5rem;border-radius:4px;
+       font-size:.75rem;font-family:var(--mono);margin:.1rem}
+  .tag-ok{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+  .tag-warn{background:rgba(240,136,62,.15);color:var(--orange);border:1px solid rgba(240,136,62,.3)}
+  .tag-info{background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)}
+  .tag-run{background:rgba(188,140,255,.15);color:var(--purple);border:1px solid rgba(188,140,255,.3)}
+  table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.6rem 0}
+  th{background:var(--bg3);color:var(--dim);padding:.45rem .7rem;text-align:left;
+     border-bottom:1px solid var(--border)}
+  td{padding:.45rem .7rem;border-bottom:1px solid var(--border)}
+  tr:last-child td{border-bottom:none}
+  .highlight-t{color:var(--blue);font-weight:600}
+  .highlight-v{color:var(--orange);font-weight:600}
+  .note{background:rgba(63,185,80,.06);border:1px solid rgba(63,185,80,.25);
+        border-radius:6px;padding:.8rem 1rem;margin:.8rem 0}
+  .warn-box{background:rgba(240,136,62,.06);border:1px solid rgba(240,136,62,.25);
+            border-radius:6px;padding:.8rem 1rem;margin:.8rem 0}
+  .err-box{background:rgba(248,81,73,.06);border:1px solid rgba(248,81,73,.25);
+           border-radius:6px;padding:.8rem 1rem;margin:.8rem 0}
+  canvas{width:100%;max-width:860px;display:block}
+  .toc{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+       padding:1rem 1.4rem;margin:1rem 0;font-size:.88rem}
+  .toc a{color:var(--blue);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .toc li{margin:.2rem 0}
+  nav{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.2rem}
+  nav a{font-size:.75rem;font-family:var(--mono);color:var(--dim);
+        border:1px solid var(--border);border-radius:4px;padding:.1rem .5rem;
+        text-decoration:none}
+  nav a:hover{color:var(--blue);border-color:var(--blue)}
+</style>
+</head>
+<body>
+
+<h1>MoELoRA 梯度主导分析 · 完整技术文档</h1>
+<p class="sub">CoIN / grad 分支 · 2026-06-04 · 覆盖：研究目标 · 数学原理 · 代码实现 · 实验结果</p>
+
+<nav>
+  <a href="#sec-goal">① 目标</a>
+  <a href="#sec-files">② 文件结构</a>
+  <a href="#sec-math">③ 梯度原理</a>
+  <a href="#sec-code">④ 代码实现</a>
+  <a href="#sec-eng">⑤ 工程问题</a>
+  <a href="#sec-result">⑥ 实验结果</a>
+  <a href="#sec-next">⑦ 下一步</a>
+</nav>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-goal">① 研究目标</h2>
+<div class="card">
+<p><strong>研究问题</strong>：持续指令微调（T1→T8）中，MoELoRA 的文本梯度是否系统性主导参数更新，且这种主导是否随任务序号单调加剧？</p>
+<p><strong>核心指标</strong>：梯度主导比值 <span class="highlight-t">R(k)</span></p>
+<div class="code">R(k)  =  ||G^t_k||_F / ||G^v_k||_F
+
+其中：
+  G^t_k  =  第 k 个任务训练中，文本 token 对 W_A 参数梯度的贡献量
+  G^v_k  =  视觉 token 对 W_A 参数梯度的贡献量
+  k = 任务序号（1=ScienceQA … 8=OCRVQA）
+
+精确定义（W_A）：
+  G^t_A[n,r,d] = Σ_{t∈text}  (∂L/∂out_A)[t,n,r]  ×  x[t,d]
+  G^v_A[n,r,d] = Σ_{t∈visual} (∂L/∂out_A)[t,n,r]  ×  x[t,d]</div>
+<table>
+  <tr><th>预期现象</th><th>对应指标</th></tr>
+  <tr><td>文本梯度始终主导</td><td>所有任务 R(k) > 1</td></tr>
+  <tr><td>主导随任务序列加剧</td><td>R(k) 随 k 单调递增</td></tr>
+  <tr><td>这是视觉模态知识更易被遗忘的机制性原因</td><td>与 text/visual acc 差距相关</td></tr>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-files">② 文件结构</h2>
+<div class="card">
+<h3>新增文件（grad 分支）</h3>
+<table>
+  <tr><th>文件</th><th>位置</th><th>作用</th></tr>
+  <tr><td><code>gradient_logger.py</code></td><td>ETrain/Train/LLaVA/</td><td>ModalGradientLogger：attach 到模型，记录每步 G^t/G^v，写 CSV</td></tr>
+  <tr><td><code>train_grad.py</code></td><td>ETrain/Train/LLaVA/</td><td>训练入口：monkey-patch LLaVATrainer 注入 GradLogCallback</td></tr>
+  <tr><td><code>run_grad_t1_single.sh</code></td><td>scripts/LLaVA/Train_MOE/</td><td>单卡（GPU 6）启动，无 DeepSpeed，T1 ScienceQA 已完成</td></tr>
+  <tr><td><code>run_grad_t1_2gpu.sh</code></td><td>scripts/LLaVA/Train_MOE/</td><td>双卡（GPU 6,7）ZeRO-3 启动，CUDA_HOME=cuda-11.8</td></tr>
+</table>
+<h3>修改文件</h3>
+<table>
+  <tr><th>文件</th><th>改动</th></tr>
+  <tr><td><code>coinmoelora.py</code></td><td><code>_lora_vectorized()</code> 注册精确梯度 hook；x_ref 闭包 + hook_A/hook_B 协调</td></tr>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-math">③ 梯度记录的数学原理</h2>
+<p style="color:var(--dim)">从 token 序列结构出发，完整推导梯度如何按模态分解，以及代码实际测量了什么。</p>
+
+<div class="card">
+<h3>Step 1 · 输入序列的模态结构</h3>
+<svg viewBox="0 0 820 200" width="100%" style="min-height:180px">
+  <defs>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#6e7681"/>
+    </marker>
+  </defs>
+
+  <!-- legend row -->
+  <rect x="10"  y="8" width="18" height="18" rx="3" fill="rgba(240,136,62,.3)" stroke="#f0883e"/>
+  <text x="32"  y="22" fill="#f0883e" font-size="13" font-family="monospace">视觉 token  (mask=1)</text>
+  <rect x="210" y="8" width="18" height="18" rx="3" fill="rgba(88,166,255,.3)" stroke="#58a6ff"/>
+  <text x="232" y="22" fill="#58a6ff" font-size="13" font-family="monospace">文本 token  (mask=2)</text>
+  <rect x="450" y="8" width="18" height="18" rx="3" fill="rgba(100,100,100,.3)" stroke="#444"/>
+  <text x="472" y="22" fill="#6e7681" font-size="13" font-family="monospace">padding  (mask=0, 不参与)</text>
+
+  <!-- sequence bar -->
+  <rect x="10"  y="42" width="220" height="44" rx="5" fill="rgba(240,136,62,.15)" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="120" y="60" fill="#f0883e" font-size="14" text-anchor="middle" font-family="monospace">图像 token</text>
+  <text x="120" y="78" fill="#f0883e" font-size="12" text-anchor="middle" font-family="monospace">~576 个 (CLIP-336 patch)</text>
+
+  <rect x="236" y="42" width="180" height="44" rx="5" fill="rgba(88,166,255,.12)" stroke="#58a6ff" stroke-width="1"/>
+  <text x="326" y="60" fill="#58a6ff" font-size="14" text-anchor="middle" font-family="monospace">指令文本</text>
+  <text x="326" y="78" fill="#6e7681" font-size="12" text-anchor="middle" font-family="monospace">"请描述这张图..."</text>
+
+  <rect x="422" y="42" width="200" height="44" rx="5" fill="rgba(63,185,80,.18)" stroke="#3fb950" stroke-width="2"/>
+  <text x="522" y="60" fill="#3fb950" font-size="14" text-anchor="middle" font-family="monospace">回答文本</text>
+  <text x="522" y="78" fill="#3fb950" font-size="12" text-anchor="middle" font-family="monospace">← loss 在这里计算</text>
+
+  <rect x="628" y="42" width="80" height="44" rx="5" fill="rgba(100,100,100,.15)" stroke="#444"/>
+  <text x="668" y="66" fill="#6e7681" font-size="13" text-anchor="middle" font-family="monospace">pad</text>
+
+  <!-- token mask label row -->
+  <text x="10" y="108" fill="#6e7681" font-size="12" font-family="monospace">token_mask:</text>
+  <rect x="10"  y="116" width="220" height="26" rx="3" fill="rgba(240,136,62,.08)" stroke="#30363d"/>
+  <text x="120" y="134" fill="#f0883e" font-size="13" text-anchor="middle" font-family="monospace">1  1  1  1  …  1</text>
+  <rect x="236" y="116" width="180" height="26" rx="3" fill="rgba(88,166,255,.08)" stroke="#30363d"/>
+  <text x="326" y="134" fill="#58a6ff" font-size="13" text-anchor="middle" font-family="monospace">2  2  2  …  2</text>
+  <rect x="422" y="116" width="200" height="26" rx="3" fill="rgba(63,185,80,.1)" stroke="#30363d"/>
+  <text x="522" y="134" fill="#3fb950" font-size="13" text-anchor="middle" font-family="monospace">2  2  2  …  2</text>
+  <rect x="628" y="116" width="80" height="26" rx="3" fill="rgba(100,100,100,.08)" stroke="#30363d"/>
+  <text x="668" y="134" fill="#6e7681" font-size="13" text-anchor="middle" font-family="monospace">0  0  …</text>
+
+  <!-- ScienceQA stats -->
+  <text x="10" y="175" fill="#6e7681" font-size="13" font-family="monospace">ScienceQA 实测（eval batch）：</text>
+  <text x="10" y="192" fill="#f0883e" font-size="13" font-family="monospace">视觉 ~69%  (~145k tokens/batch)</text>
+  <text x="260" y="192" fill="#58a6ff" font-size="13" font-family="monospace">文本 ~31%  (~65k tokens/batch)</text>
+  <text x="560" y="192" fill="#6e7681" font-size="12" font-family="monospace">视觉 token 反而更多！</text>
+</svg>
+</div>
+
+<div class="card">
+<h3>Step 2 · LoRA Forward + Backward 全流程</h3>
+<svg viewBox="0 0 820 300" width="100%" style="min-height:280px">
+  <defs>
+    <marker id="arr_f" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arr_b" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#f85149"/>
+    </marker>
+    <marker id="arr_h" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#e3b341"/>
+    </marker>
+  </defs>
+
+  <!-- Forward path label -->
+  <text x="10" y="20" fill="#3fb950" font-size="14" font-family="monospace" font-weight="bold">→ Forward</text>
+  <text x="200" y="20" fill="#f85149" font-size="14" font-family="monospace" font-weight="bold">← Backward</text>
+  <text x="420" y="20" fill="#e3b341" font-size="14" font-family="monospace" font-weight="bold">⚡ Hook 捕获点</text>
+
+  <!-- x box -->
+  <rect x="10" y="36" width="80" height="50" rx="6" fill="rgba(88,166,255,.1)" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="50" y="58" fill="#58a6ff" font-size="15" text-anchor="middle" font-family="monospace" font-weight="bold">x</text>
+  <text x="50" y="76" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">(B,T,d_in)</text>
+
+  <!-- W_A box -->
+  <rect x="140" y="36" width="90" height="50" rx="6" fill="rgba(188,140,255,.12)" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="185" y="58" fill="#bc8cff" font-size="15" text-anchor="middle" font-family="monospace" font-weight="bold">W_A</text>
+  <text x="185" y="76" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">(N,r,d_in)</text>
+
+  <!-- out_A box -->
+  <rect x="290" y="36" width="100" height="50" rx="6" fill="rgba(188,140,255,.08)" stroke="#bc8cff" stroke-width="1"/>
+  <text x="340" y="58" fill="#bc8cff" font-size="14" text-anchor="middle" font-family="monospace">out_A</text>
+  <text x="340" y="76" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">(B,T,N,r)</text>
+
+  <!-- W_B box -->
+  <rect x="450" y="36" width="90" height="50" rx="6" fill="rgba(227,179,65,.12)" stroke="#e3b341" stroke-width="1.5"/>
+  <text x="495" y="58" fill="#e3b341" font-size="15" text-anchor="middle" font-family="monospace" font-weight="bold">W_B</text>
+  <text x="495" y="76" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">(N,d_out,r)</text>
+
+  <!-- out_B box -->
+  <rect x="600" y="36" width="100" height="50" rx="6" fill="rgba(227,179,65,.08)" stroke="#e3b341" stroke-width="1"/>
+  <text x="650" y="58" fill="#e3b341" font-size="14" text-anchor="middle" font-family="monospace">out_B</text>
+  <text x="650" y="76" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">(B,T,N,d_out)</text>
+
+  <!-- Loss box -->
+  <rect x="730" y="36" width="80" height="50" rx="6" fill="rgba(63,185,80,.15)" stroke="#3fb950" stroke-width="2"/>
+  <text x="770" y="62" fill="#3fb950" font-size="15" text-anchor="middle" font-family="monospace" font-weight="bold">Loss</text>
+
+  <!-- Forward arrows -->
+  <line x1="90" y1="61" x2="136" y2="61" stroke="#3fb950" stroke-width="2" marker-end="url(#arr_f)"/>
+  <line x1="230" y1="61" x2="286" y2="61" stroke="#3fb950" stroke-width="2" marker-end="url(#arr_f)"/>
+  <line x1="390" y1="61" x2="446" y2="61" stroke="#3fb950" stroke-width="2" marker-end="url(#arr_f)"/>
+  <line x1="540" y1="61" x2="596" y2="61" stroke="#3fb950" stroke-width="2" marker-end="url(#arr_f)"/>
+  <line x1="700" y1="61" x2="726" y2="61" stroke="#3fb950" stroke-width="2" marker-end="url(#arr_f)"/>
+
+  <!-- Backward arrows (below) -->
+  <line x1="726" y1="100" x2="702" y2="100" stroke="#f85149" stroke-width="2" marker-end="url(#arr_b)"/>
+  <line x1="598" y1="100" x2="544" y2="100" stroke="#f85149" stroke-width="2" marker-end="url(#arr_b)"/>
+  <line x1="448" y1="100" x2="394" y2="100" stroke="#f85149" stroke-width="2" marker-end="url(#arr_b)"/>
+  <line x1="288" y1="100" x2="234" y2="100" stroke="#f85149" stroke-width="2" marker-end="url(#arr_b)"/>
+  <line x1="138" y1="100" x2="94" y2="100" stroke="#f85149" stroke-width="2" marker-end="url(#arr_b)"/>
+
+  <!-- hook_B annotation -->
+  <line x1="650" y1="86" x2="650" y2="130" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <rect x="590" y="130" width="120" height="44" rx="4" fill="rgba(227,179,65,.1)" stroke="#e3b341"/>
+  <text x="650" y="148" fill="#e3b341" font-size="12" text-anchor="middle" font-family="monospace" font-weight="bold">hook_B</text>
+  <text x="650" y="166" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">∂L/∂out_B 捕获</text>
+
+  <!-- hook_A annotation -->
+  <line x1="340" y1="86" x2="340" y2="130" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <rect x="280" y="130" width="120" height="44" rx="4" fill="rgba(227,179,65,.1)" stroke="#e3b341"/>
+  <text x="340" y="148" fill="#e3b341" font-size="12" text-anchor="middle" font-family="monospace" font-weight="bold">hook_A</text>
+  <text x="340" y="166" fill="#6e7681" font-size="11" text-anchor="middle" font-family="monospace">∂L/∂out_A 捕获</text>
+
+  <!-- timing note -->
+  <text x="10" y="208" fill="#6e7681" font-size="12" font-family="monospace">Backward 触发顺序（重要）：</text>
+  <rect x="10" y="218" width="800" height="72" rx="6" fill="rgba(255,255,255,.02)" stroke="#30363d"/>
+  <text x="22" y="238" fill="#c9d1d9" font-size="13" font-family="monospace">1. Loss → out_B 节点 → <tspan fill="#e3b341">hook_B 触发</tspan>，写入 _pending[(step,layer)]</text>
+  <text x="22" y="258" fill="#c9d1d9" font-size="13" font-family="monospace">2. out_B → out_A 节点 → <tspan fill="#e3b341">hook_A 触发</tspan>，从 _pending 取 hook_B 的结果，写 CSV</text>
+  <text x="22" y="278" fill="#6e7681" font-size="12" font-family="monospace">   out_B 依赖 out_A（out_B=einsum(out_A,B)），所以 out_B 的梯度先于 out_A 的梯度传入——确定性顺序</text>
+</svg>
+</div>
+
+<div class="card">
+<h3>Step 3 · 从 ∂L/∂h 到 ∂L/∂W_A 的完整推导（W_A 和 W_B）</h3>
+
+<h4>W_A 的推导</h4>
+<p>Forward 展开为下标形式（t = 序列位置，i = 输出维度 r，j = 输入维度 d_in）：</p>
+<div class="code">h_A[t, i]  =  Σ_j  W_A[i, j] · x[t, j]     ← forward 的精确定义
+
+对 W_A[i, j] 用链式法则求偏导：
+
+∂L/∂W_A[i,j]
+  =  Σ_t  (∂L/∂h_A[t,i])  ·  (∂h_A[t,i]/∂W_A[i,j])
+       ↑                         ↑
+   G_out_A[t,i]            从 forward 读出 = x[t, j]
+
+  =  Σ_t  G_out_A[t, i]  ·  x[t, j]
+
+写成矩阵乘法：
+∂L/∂W_A  =  G_out_A^T  @  x
+形状验证：(r×T) @ (T×d_in) = r×d_in  ✓</div>
+
+<h4>W_B 的推导（完全对称）</h4>
+<div class="code">h_B[t, p]  =  Σ_i  W_B[p, i] · h_A[t, i] · scaling
+
+∂L/∂W_B[p, i]
+  =  Σ_t  (∂L/∂h_B[t,p])  ·  h_A[t, i] · scaling
+       ↑
+   G_out_B[t,p]
+
+矩阵形式：∂L/∂W_B  =  G_out_B^T  @  h_A  · scaling
+形状验证：(d_out×T) @ (T×r) = d_out×r  ✓</div>
+
+<h4>按模态分解（W_A 和 W_B 完全对称）</h4>
+<div class="code">对 W_A：把 x 拆成 x_text + x_visual
+∂L/∂W_A  =  G_out_A^T @ x
+           =  G_out_A^T @ (x_text + x_visual)
+           =  G_out_A^T @ x_text   +   G_out_A^T @ x_visual
+           =       G^t_A           +        G^v_A
+
+对 W_B：把 h_A 拆成 h_A_text + h_A_visual
+∂L/∂W_B  =  G_out_B^T @ h_A
+           =  G_out_B^T @ h_A_text   +   G_out_B^T @ h_A_visual
+           =       G^t_B             +        G^v_B
+
+关键性质：G^t + G^v = 完整梯度（精确等式，无近似，因为 x_text 和 x_visual 在 token 空间不重叠）</div>
+</div>
+
+<div class="card">
+<h3>Step 4 · 精确梯度分解：G^t 和 G^v 是什么</h3>
+<svg viewBox="0 0 820 340" width="100%">
+  <!-- Block 1: Full equation -->
+  <rect x="8" y="8" width="804" height="80" rx="6" fill="rgba(188,140,255,.05)" stroke="#bc8cff" stroke-width="1.2"/>
+  <text x="20" y="32" fill="#bc8cff" font-size="15" font-family="monospace" font-weight="bold">∂L/∂W_A  =  ∂L/∂h_A ᵀ  ×  x</text>
+  <text x="20" y="54" fill="#6e7681" font-size="13" font-family="monospace">          形状：  (r × T)       ×  (T × d_in)   =   (r × d_in)   ← 与 W_A 完全一致</text>
+  <text x="20" y="76" fill="#6e7681" font-size="12" font-family="monospace">          含义：  每列 = 一个 rank 维度对所有 token 的加权求和</text>
+  <!-- Block 2: Decompose x -->
+  <rect x="8" y="102" width="804" height="80" rx="6" fill="rgba(255,255,255,.03)" stroke="#30363d"/>
+  <text x="20" y="126" fill="#c9d1d9" font-size="14" font-family="monospace">          =  ∂L/∂h_A ᵀ  ×  ( x_text  +  x_visual )</text>
+  <text x="20" y="150" fill="#6e7681" font-size="12" font-family="monospace">                              ↑ token 位置 mask==2 处有值，其余=0</text>
+  <text x="520" y="150" fill="#6e7681" font-size="12" font-family="monospace">↑ token 位置 mask==1 处有值，其余=0</text>
+  <text x="20" y="172" fill="#e3b341" font-size="12" font-family="monospace">          ← 矩阵乘法分配律：A(B+C)=AB+AC，可以精确拆分，无任何近似！</text>
+  <!-- Block 3: G^t + G^v -->
+  <rect x="8" y="196" width="804" height="100" rx="6" fill="rgba(255,255,255,.03)" stroke="#30363d"/>
+  <rect x="20" y="210" width="12" height="40" rx="2" fill="#58a6ff"/>
+  <text x="42"  y="228" fill="#c9d1d9" font-size="14" font-family="monospace">=  ∂L/∂h_A ᵀ  ×  x_text</text>
+  <text x="42"  y="246" fill="#6e7681" font-size="12" font-family="monospace">   只有文本 token 位置的 x 有值</text>
+  <text x="540" y="236" fill="#58a6ff" font-size="15" font-family="monospace" font-weight="bold">← G^t_A   文本梯度贡献</text>
+  <rect x="20" y="258" width="12" height="40" rx="2" fill="#f0883e"/>
+  <text x="42"  y="276" fill="#c9d1d9" font-size="14" font-family="monospace">+  ∂L/∂h_A ᵀ  ×  x_visual</text>
+  <text x="42"  y="294" fill="#6e7681" font-size="12" font-family="monospace">   只有视觉 token 位置的 x 有值</text>
+  <text x="540" y="284" fill="#f0883e" font-size="15" font-family="monospace" font-weight="bold">← G^v_A   视觉梯度贡献</text>
+  <!-- Key property -->
+  <rect x="8" y="308" width="804" height="26" rx="4" fill="rgba(227,179,65,.08)" stroke="#e3b341"/>
+  <text x="20" y="326" fill="#e3b341" font-size="13" font-family="monospace" font-weight="bold">关键：G^t_A + G^v_A = ∂L/∂W_A  （精确等式，x_text 与 x_visual 在 token 空间不重叠）</text>
+</svg>
+
+<p><strong>精确指标 vs 之前的代理指标：</strong></p>
+<svg viewBox="0 0 820 160" width="100%">
+  <rect x="10" y="10" width="385" height="140" rx="6" fill="rgba(248,81,73,.04)" stroke="#f85149" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="202" y="36" fill="#f85149" font-size="14" text-anchor="middle" font-family="monospace">❌ 旧代理指标（已替换）</text>
+  <text x="26"  y="62" fill="#c9d1d9" font-size="13" font-family="monospace">g_text = ‖ ∂L/∂h_A × text_mask ‖_F</text>
+  <text x="26"  y="82" fill="#6e7681" font-size="12" font-family="monospace">只捕获梯度信号强度，不含 x 的幅度</text>
+  <text x="26"  y="102" fill="#6e7681" font-size="12" font-family="monospace">需要 ‖x_text‖ ≈ ‖x_visual‖ 才成比例</text>
+  <text x="26"  y="122" fill="#f85149" font-size="12" font-family="monospace">内存：只需 raw_mask（2KB/层）</text>
+  <text x="26"  y="142" fill="#f85149" font-size="12" font-family="monospace">结果：R ≈ 20x（proxy）</text>
+
+  <rect x="425" y="10" width="385" height="140" rx="6" fill="rgba(63,185,80,.06)" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="618" y="36" fill="#3fb950" font-size="14" text-anchor="middle" font-family="monospace">✓ 精确指标（当前实现）</text>
+  <text x="440" y="62" fill="#c9d1d9" font-size="13" font-family="monospace">G^t_A = einsum('tnr,td→nrd', g_t, x_t)</text>
+  <text x="440" y="82" fill="#6e7681" font-size="12" font-family="monospace">精确外积求和，含 x 的幅度信息</text>
+  <text x="440" y="102" fill="#6e7681" font-size="12" font-family="monospace">不依赖 ‖x_text‖≈‖x_visual‖ 假设</text>
+  <text x="440" y="122" fill="#3fb950" font-size="12" font-family="monospace">内存：x_ref 闭包（~112MB 峰值）</text>
+  <text x="440" y="142" fill="#3fb950" font-size="12" font-family="monospace">R 结果待 T1 重跑确认</text>
+</svg>
+</div>
+
+<div class="card">
+<h3>Step 5 · 为什么 R_A 实测是 20× 而不是 2-3×？</h3>
+<p>一个主要放大效应 + 一个反向校正效应，净结果 ≈ 20×：</p>
+<svg viewBox="0 0 820 290" width="100%">
+  <defs>
+    <marker id="arrowG2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L6,3 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+  <!-- Effect 1: main driver -->
+  <rect x="10" y="10" width="500" height="195" rx="8" fill="rgba(248,81,73,.05)" stroke="#f85149" stroke-width="1.5"/>
+  <text x="260" y="36" fill="#f85149" font-size="15" text-anchor="middle" font-family="monospace" font-weight="bold">效应 ① Loss 仅在文本回答位置产生直接梯度</text>
+  <rect x="26"  y="50" width="110" height="26" rx="4" fill="rgba(63,185,80,.2)" stroke="#3fb950"/>
+  <text x="81"  y="68" fill="#3fb950" font-size="12" text-anchor="middle" font-family="monospace">Loss（交叉熵）</text>
+  <line x1="81" y1="76" x2="81" y2="90" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowG2)"/>
+  <rect x="26"  y="90" width="110" height="26" rx="4" fill="rgba(63,185,80,.15)" stroke="#3fb950"/>
+  <text x="81"  y="108" fill="#3fb950" font-size="12" text-anchor="middle" font-family="monospace">回答 token</text>
+  <line x1="81" y1="116" x2="81" y2="130" stroke="#6e7681" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowG2)"/>
+  <rect x="26"  y="130" width="110" height="26" rx="4" fill="rgba(88,166,255,.12)" stroke="rgba(88,166,255,.5)"/>
+  <text x="81"  y="148" fill="#58a6ff" font-size="12" text-anchor="middle" font-family="monospace">指令 token</text>
+  <line x1="81" y1="156" x2="81" y2="170" stroke="#6e7681" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrowG2)"/>
+  <rect x="26"  y="170" width="110" height="26" rx="4" fill="rgba(240,136,62,.12)" stroke="rgba(240,136,62,.5)"/>
+  <text x="81"  y="188" fill="#f0883e" font-size="12" text-anchor="middle" font-family="monospace">视觉 token</text>
+  <text x="148" y="68"  fill="#3fb950" font-size="13" font-family="monospace" font-weight="bold">直接梯度，幅度 ~1.0</text>
+  <text x="148" y="108" fill="#58a6ff" font-size="13" font-family="monospace">间接传播，×0.1~0.2</text>
+  <text x="148" y="148" fill="#58a6ff" font-size="12" font-family="monospace">（via causal attention）</text>
+  <text x="148" y="178" fill="#f0883e" font-size="13" font-family="monospace">更远，×0.05~0.1</text>
+  <rect x="10" y="213" width="500" height="42" rx="0 0 8 8" fill="rgba(248,81,73,.08)"/>
+  <text x="260" y="232" fill="#6e7681" font-size="12" text-anchor="middle" font-family="monospace">causal LM 只对回答 token 计算 loss，视觉 token 梯度需跨多跳 attention 衰减</text>
+  <text x="260" y="250" fill="#f85149" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">单独此效应 → R ≈ 15~30×  （主要驱动）</text>
+
+  <!-- Effect 2: counter-factor -->
+  <rect x="528" y="10" width="282" height="195" rx="8" fill="rgba(88,166,255,.04)" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="669" y="36" fill="#58a6ff" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">效应 ② token 数量（反向！）</text>
+  <rect x="568" y="52" width="20" height="36" rx="3" fill="rgba(88,166,255,.5)"/>
+  <text x="578" y="100" fill="#58a6ff" font-size="11" text-anchor="middle" font-family="monospace">文本</text>
+  <text x="578" y="112" fill="#58a6ff" font-size="11" text-anchor="middle" font-family="monospace">31%</text>
+  <rect x="600" y="30" width="20" height="58" rx="3" fill="rgba(240,136,62,.6)"/>
+  <text x="610" y="100" fill="#f0883e" font-size="11" text-anchor="middle" font-family="monospace">视觉</text>
+  <text x="610" y="112" fill="#f0883e" font-size="11" text-anchor="middle" font-family="monospace">69%</text>
+  <text x="640" y="60"  fill="#c9d1d9" font-size="12" font-family="monospace">ScienceQA 实测：</text>
+  <text x="640" y="78"  fill="#f0883e" font-size="12" font-family="monospace">视觉 ~69%（CLIP 576个）</text>
+  <text x="640" y="96"  fill="#58a6ff" font-size="12" font-family="monospace">文本 ~31%（题干较短）</text>
+  <text x="640" y="120" fill="#6e7681" font-size="12" font-family="monospace">视觉 token 反而更多！</text>
+  <rect x="528" y="213" width="282" height="42" rx="0 0 8 8" fill="rgba(88,166,255,.06)"/>
+  <text x="669" y="232" fill="#6e7681" font-size="12" text-anchor="middle" font-family="monospace">梯度范数 ∝ √(token 数)</text>
+  <text x="669" y="250" fill="#58a6ff" font-size="13" text-anchor="middle" font-family="monospace" font-weight="bold">→ ×0.67（压低 R）</text>
+
+  <!-- Result bar -->
+  <rect x="10" y="262" width="800" height="24" rx="5" fill="rgba(227,179,65,.10)" stroke="#e3b341" stroke-width="1.2"/>
+  <text x="410" y="278" fill="#e3b341" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">净效果：效应① 30× × 效应② 0.67 ≈ 20×，与实测 median R_A = 20× 吻合</text>
+</svg>
+<div class="err-box">
+<strong>注意：之前 HTML 版本中"效应①文本 token 数量多"的说法是错误的。</strong>ScienceQA 实测视觉 token 占 69%，效应②（token 数量差异）实际在<strong>压低</strong> R，不是放大。效应①（loss 位置效应）需独立贡献约 30×，才能在 ×0.67 校正后得到实测的 20×。
+</div>
+</div>
+
+<div class="card">
+<h3>Step 6 · MoELoRA 梯度共享：为什么 R_B(36×) &gt; R_A(20×)</h3>
+<p>MoELoRA 有 N=8 个专家，每个专家有独立 <code>W_A_i</code>，但所有专家<strong>共享同一个 W_B</strong>。</p>
+<svg viewBox="0 0 820 130" width="100%">
+  <defs>
+    <marker id="arr_wb" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#6e7681"/>
+    </marker>
+  </defs>
+  <!-- W_A panel -->
+  <rect x="10" y="10" width="370" height="110" rx="6" fill="rgba(188,140,255,.05)" stroke="#bc8cff" stroke-width="1.2"/>
+  <text x="195" y="34" fill="#bc8cff" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">W_A_i（每个专家独立）</text>
+  <text x="26"  y="58" fill="#c9d1d9" font-size="13" font-family="monospace">梯度 = ∂L/∂h_A_i × x</text>
+  <text x="26"  y="78" fill="#6e7681" font-size="12" font-family="monospace">只受单个专家路径上的梯度影响</text>
+  <text x="26"  y="98" fill="#6e7681" font-size="12" font-family="monospace">∂L/∂h_A_i = W_Bᵀ · ∂L/∂h_B（通过 W_B 反传）</text>
+  <text x="26"  y="116" fill="#bc8cff" font-size="13" font-family="monospace" font-weight="bold">→ median R_A ≈ 20×</text>
+  <!-- W_B panel -->
+  <rect x="440" y="10" width="370" height="110" rx="6" fill="rgba(240,136,62,.07)" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="625" y="34" fill="#f0883e" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">W_B（所有专家共享）</text>
+  <text x="456" y="58" fill="#c9d1d9" font-size="13" font-family="monospace">∂L/∂W_B = Σᵢ wᵢ·(∂L/∂h_B · h_A_iᵀ)</text>
+  <text x="456" y="78" fill="#6e7681" font-size="12" font-family="monospace">汇聚 8 条路径的文本偏置梯度</text>
+  <text x="456" y="98" fill="#6e7681" font-size="12" font-family="monospace">各专家 h_A_i 均偏文本，求和后更偏</text>
+  <text x="456" y="116" fill="#f0883e" font-size="13" font-family="monospace" font-weight="bold">→ median R_B ≈ 36×</text>
+</svg>
+<div class="note">
+<strong>梯度共享的核心含义：</strong> W_B 在 backward 中同时接收来自 8 条专家路径的梯度，这些路径在文本方向高度对齐（每个 W_A_i 都已经偏文本了），叠加导致 R_B > R_A。共享的 W_B 是文本偏置的放大器和集散地，也是持续学习中视觉表征退化的关键机制节点。
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-code">④ 代码实现</h2>
+
+<div class="card">
+<h3>核心：coinmoelora.py — hook_A / hook_B</h3>
+<p>在 <code>_lora_vectorized()</code> 里，当 <code>_log_gradients=True</code> 时，计算完 <code>out_A</code> 和 <code>out_B</code> 之后注册两个 backward hook：</p>
+
+<p class="file-header">CoIN/peft/tuners/coinmoelora.py  → _lora_vectorized()</p>
+<div class="code-file">if getattr(self, '_log_gradients', False):
+    raw_mask   = self.token_mask           # (B,T) int  —  小，2KB
+    logger_ref = getattr(self, '_grad_logger', None)
+    layer_name = getattr(self, '_grad_layer_name', '')
+    step       = logger_ref.step if logger_ref is not None else 0
+    log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
+
+    out_A = torch.einsum('bti,nri->btnr', lora_x, A)   # (B,T,N,r_per)
+    out_B = torch.einsum('btnr,nor->btno', out_A, B)    # (B,T,N,d_out)
+
+    # 关键：lora_x 捕获在 mutable list 里，hook 触发后立刻置 None 释放
+    # gradient_checkpointing 下，此闭包在 backward 重计算阶段创建，生命周期短
+    # 峰值内存：~7 modules × 16MB per checkpoint segment ≈ 112MB
+    x_ref = [lora_x.detach()]  # (B, T, d_in)
+
+    # hook_B：W_B 代理指标（proxy），无需 x，直接用 ∂L/∂out_B 的范数
+    def hook_B(g_out_B):
+        if logger_ref is None or step % log_every != 0:
+            return
+        with torch.no_grad():
+            tm = (raw_mask == 2).float()[:, :, None, None]
+            vm = (raw_mask == 1).float()[:, :, None, None]
+            logger_ref._pending[(step, layer_name)] = {
+                'g_tB': (g_out_B * tm).norm().item(),
+                'g_vB': (g_out_B * vm).norm().item(),
+            }
+
+    # hook_A：W_A 精确指标，用 einsum 计算真实外积和
+    def hook_A(g_out_A):
+        # g_out_A: (B, T, N, r_per)
+        x_cap = x_ref[0]
+        x_ref[0] = None  # 立刻释放，不管是否记录
+
+        if logger_ref is None or step % log_every != 0:
+            return
+        with torch.no_grad():
+            mask1d = raw_mask[0] if raw_mask.dim() == 2 else raw_mask
+            t_idx = (mask1d == 2)  # (T,) bool
+            v_idx = (mask1d == 1)
+
+            g_t = g_out_A[0, t_idx, :, :]  # (T_text, N, r_per)
+            g_v = g_out_A[0, v_idx, :, :]  # (T_vis,  N, r_per)
+            x_t = x_cap[0,   t_idx, :]      # (T_text, d_in)
+            x_v = x_cap[0,   v_idx, :]      # (T_vis,  d_in)
+
+            # 精确外积求和：G^t_A[n,r,d] = Σ_t g_t[t,n,r] * x_t[t,d]
+            G_t = torch.einsum('tnr,td->nrd', g_t, x_t)  # (N, r_per, d_in)
+            G_v = torch.einsum('tnr,td->nrd', g_v, x_v)
+
+            entry = logger_ref._pending.pop((step, layer_name), {})
+            logger_ref._flush(
+                step, layer_name,
+                G_t.norm().item(), G_v.norm().item(),
+                entry.get('g_tB', 0.0), entry.get('g_vB', 0.0),
+            )
+
+    if out_B.requires_grad:
+        out_B.register_hook(hook_B)
+    if out_A.requires_grad:
+        out_A.register_hook(hook_A)
+
+    return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]</div>
+</div>
+
+<div class="card">
+<h3>ModalGradientLogger — 记录器主类</h3>
+<p>负责 attach 到模型、协调 hook 结果、写 CSV。每个 rank 写独立文件，不会 race condition。</p>
+
+<p class="file-header">ETrain/Train/LLaVA/gradient_logger.py</p>
+<div class="code-file">class ModalGradientLogger:
+    """
+    支持：gradient_checkpointing / ZeRO-2 / ZeRO-3 / DDP
+    多 GPU：每个 rank 写 {task}_rank{N}_grad_stats.csv，分析时合并
+    """
+
+    def attach(self, model: nn.Module) -> None:
+        """在每个 CoINMOELoraLinear 上设置三个属性，触发 hook 注册"""
+        for name, module in model.named_modules():
+            if isinstance(module, CoINMOELoraLinear):
+                module._log_gradients   = True
+                module._grad_logger     = self
+                module._grad_layer_name = name
+
+    def step_end(self) -> None:
+        self.step += 1   # 每个 optimizer step 后调用一次
+
+    def _flush(self, step, layer, g_tA, g_vA, g_tB, g_vB) -> None:
+        """hook_A 触发后调用，追加一条记录"""
+        if step % self.log_every_n_steps != 0:
+            return
+        self.records.append(_StepRecord(step, layer, g_tA, g_vA, g_tB, g_vB))
+
+    def save_csv(self, task_name: str) -> str:
+        """训练结束时调用，写 {task}_rank{N}_grad_stats.csv"""
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        path = f"{self.output_dir}/{task_name}_rank{rank}_grad_stats.csv"
+        # 写入 step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
+        ...</div>
+
+<p>CSV 结构：</p>
+<div class="code">step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
+1,  base_model.model.layers.0.self_attn.q_proj,  0.2871,  0.0000,  inf,  0.1672,  0.0000,  inf
+5,  base_model.model.layers.0.self_attn.q_proj,  0.3142,  0.0156,  20.1, 0.2011,  0.0089,  22.6
+...</div>
+<div class="note">step=0 时 G_text_A=0 是正常的：W_B 初始化为零，因此 ∂L/∂out_A = W_Bᵀ × ∂L/∂out_B = 0。分析时过滤 step=0 和无视觉 token 的纯文本 batch（g_vis_A &lt; 1e-6）。</div>
+</div>
+
+<div class="card">
+<h3>train_grad.py — Callback 注入方式</h3>
+<p>不修改 <code>train.py</code>，通过 monkey-patch 在 LLaVATrainer 初始化时注入 callback：</p>
+
+<p class="file-header">ETrain/Train/LLaVA/train_grad.py</p>
+<div class="code-file">_grad_logger = ModalGradientLogger(log_every_n_steps=_log_every, output_dir=_grad_out_dir)
+
+class _GradLogCallback(TrainerCallback):
+    def on_train_begin(self, args, state, control, model=None, **kw):
+        torch.cuda.empty_cache()   # 释放模型加载阶段的碎片内存
+        _grad_logger.attach(model)
+
+    def on_step_end(self, args, state, control, **kw):
+        _grad_logger.step_end()    # 同步 step 计数
+
+    def on_train_end(self, args, state, control, **kw):
+        _grad_logger.save_csv(_task_name)
+
+# monkey-patch：把 callback 塞进 LLaVATrainer.__init__
+def _patched_init(self, *args, **kwargs):
+    existing = list(kwargs.get("callbacks") or [])
+    existing.append(_GradLogCallback())
+    kwargs["callbacks"] = existing
+    _orig_LLaVATrainer_init(self, *args, **kwargs)
+
+_llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
+</div>
+
+<div class="card">
+<h3>启动方式对比</h3>
+<table>
+  <tr><th>脚本</th><th>GPU</th><th>DeepSpeed</th><th>速度</th><th>状态</th></tr>
+  <tr>
+    <td><code>run_grad_t1_single.sh</code></td>
+    <td>GPU 6 · 单卡</td>
+    <td>无</td>
+    <td>~5h / task</td>
+    <td><span class="tag tag-ok">T1 已完成</span></td>
+  </tr>
+  <tr>
+    <td><code>run_grad_t1_2gpu.sh</code></td>
+    <td>GPU 6,7 · 双卡</td>
+    <td>ZeRO-3 + CPU offload</td>
+    <td>~2-3h / task</td>
+    <td><span class="tag tag-ok">smoke test ✓</span></td>
+  </tr>
+  <tr>
+    <td>（未来）8 卡 DDP ZeRO-2</td>
+    <td>8× 3090</td>
+    <td>ZeRO-2（无 offload）</td>
+    <td>~0.7h / task</td>
+    <td><span class="tag tag-warn">规划中</span></td>
+  </tr>
+</table>
+<div class="note">
+双卡 ZeRO-3 的 CUDA_HOME 必须设为 <code>/usr/local/cuda-11.8</code>（系统有 nvcc）。PyTorch 使用 cu117，与 11.8 API 兼容，DeepSpeed 会打印一条 warning 但正常运行。
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-eng">⑤ 工程问题及解决过程</h2>
+<div class="card">
+<table>
+  <tr><th>问题</th><th>根因</th><th>解决方案</th></tr>
+  <tr>
+    <td>OOM v1：模块属性存张量</td>
+    <td><code>self._log_out_B = out_B</code> 让 224 层的大张量同时驻留 GPU，14GB+</td>
+    <td>改为在 hook 内部直接计算，不挂模块属性</td>
+  </tr>
+  <tr>
+    <td>G_text_A 始终为 0（step 0）</td>
+    <td>W_B 初始化为零，第一步 ∂L/∂out_A = W_Bᵀ × ∂L/∂out_B = 0</td>
+    <td>正常行为，step ≥ 1 后 W_B 有值；分析时过滤 step=0</td>
+  </tr>
+  <tr>
+    <td>hook_B 读不到 A 的值</td>
+    <td>backward 顺序确定：out_B 在 out_A 之前触发；hook_B 触发时 hook_A 未写</td>
+    <td>hook_B 写 _pending[(step,layer)]，hook_A 来了再 pop 合并</td>
+  </tr>
+  <tr>
+    <td>DeepSpeed ZeRO-3 OOM（单卡）</td>
+    <td>all-gather/free 循环在模型加载阶段造成显存碎片（reserved 4GB 但无 300MB 连续块）</td>
+    <td>改用单卡纯 Python 训练（无 ZeRO），17GB 可容纳 7B</td>
+  </tr>
+  <tr>
+    <td>代理指标的精度问题</td>
+    <td><code>‖g_out_A × mask‖</code> 不含 x 幅度，需假设 ‖x_text‖≈‖x_visual‖</td>
+    <td>升级为精确指标：<code>einsum('tnr,td→nrd', g_t, x_t)</code> + x_ref 闭包管理内存</td>
+  </tr>
+  <tr>
+    <td>多卡写 CSV race condition</td>
+    <td>多个 rank 同时写同一文件导致数据损坏</td>
+    <td>每 rank 写独立文件 <code>{task}_rank{N}_grad_stats.csv</code>，分析时 concat</td>
+  </tr>
+  <tr>
+    <td>DeepSpeed CPUAdam nvcc 找不到</td>
+    <td><code>CUDA_HOME=$CONDA_PREFIX</code> 里没有 nvcc</td>
+    <td>改为 <code>CUDA_HOME=/usr/local/cuda-11.8</code>，cu117 缓存命中，无需重编</td>
+  </tr>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-result">⑥ T1 ScienceQA 实测结果 <span class="tag tag-ok">已完成（旧 proxy 指标）</span></h2>
+
+<div class="card">
+<h3>汇总统计</h3>
+<table>
+  <tr><th>指标</th><th>mean</th><th>median</th><th>有效记录数</th><th>说明</th></tr>
+  <tr>
+    <td><span class="highlight-t">R_A</span>（W_A 层，proxy）</td>
+    <td style="color:var(--red);font-weight:600">33.7</td>
+    <td style="color:var(--red);font-weight:600">20.0</td>
+    <td>35,277</td>
+    <td>过滤无视觉 token batch 和 step 0</td>
+  </tr>
+  <tr>
+    <td><span class="highlight-t">R_B</span>（W_B 层，proxy）</td>
+    <td style="color:var(--red)">59.2</td>
+    <td style="color:var(--red)">36.0</td>
+    <td>190,569</td>
+    <td>R_B &gt; R_A：共享 W_B 汇聚 8 条路径文本偏置</td>
+  </tr>
+</table>
+<p style="color:var(--dim);font-size:.82rem;margin-top:.3rem">
+总记录 573,440（198 steps × 64 micro-batches × 224 layers）。CSV 路径：<code>analysis/gradient_dominance/T1_ScienceQA_grad_stats.csv</code>（59 MB）
+</p>
+<div class="warn-box">
+<strong>注：</strong>上述结果使用旧的代理指标（∂L/∂out_A 范数，未含 x）。升级为精确指标后，需重跑 T1 确认数值。定性结论（R >> 1）预计不变，精确数值可能略有差异。
+</div>
+</div>
+
+<div class="card">
+<h3>Loss 曲线（T1 ScienceQA，198 步完整）</h3>
+<canvas id="lossChart" height="220"></canvas>
+<p style="margin-top:.8rem;color:var(--dim);font-size:.85rem">
+  Loss 从 4.06 快速降到 0.07~0.12，198 步收敛。总训练时长约 5h（GPU 6 单卡）。
+</p>
+</div>
+
+<div class="card">
+<h3>R_A 分布直方图（跨所有层 × 所有步骤）</h3>
+<canvas id="histChart" height="180"></canvas>
+<p style="color:var(--dim);font-size:.82rem;margin-top:.4rem">约 52% 的记录 R_A > 10（p50=17.7），约 16% 超过 50。</p>
+</div>
+
+<div class="card">
+<h3>R_A 随训练步数变化（所有层平均）</h3>
+<canvas id="tsChart" height="180"></canvas>
+<p style="color:var(--dim);font-size:.82rem;margin-top:.4rem">R_A 在训练初期（step 5）已达 17，全程在 20-40 区间波动，文本梯度主导持续存在。</p>
+</div>
+
+<div class="card">
+<h3>R_A 按 layer 类型（median）</h3>
+<canvas id="layerChart" height="160"></canvas>
+<table style="margin-top:.8rem">
+  <tr><th>Layer</th><th>median R_A</th><th>解读</th></tr>
+  <tr><td>o_proj</td><td style="color:var(--red)">34.0</td><td>attention 输出投影，文本主导最强</td></tr>
+  <tr><td>down_proj</td><td style="color:var(--red)">28.3</td><td>MLP 下投影，同样极端</td></tr>
+  <tr><td>up_proj / gate_proj</td><td>16.4 / 13.9</td><td>MLP 上/门投影，中等</td></tr>
+  <tr><td>q_proj</td><td>12.0</td><td>查询投影，相对低</td></tr>
+  <tr><td>v_proj / k_proj</td><td>9.6 / 9.1</td><td>视觉 token 在 KV 中更有参与，R 最低</td></tr>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-next">⑦ 下一步计划</h2>
+<div class="card">
+<table>
+  <tr><th>步骤</th><th>内容</th><th>状态</th></tr>
+  <tr>
+    <td>1</td>
+    <td>用精确指标重跑 T1（<code>run_grad_t1_2gpu.sh 1</code>），验证 R_A 数量级</td>
+    <td><span class="tag tag-warn">待跑</span></td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>连续跑 T2-T8，观察 R(k) 是否随 k 单调递增</td>
+    <td><span class="tag tag-warn">待跑</span></td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>生成 R(k) vs k 折线图，与 text/visual eval acc 差距对比</td>
+    <td><span class="tag tag-warn">待实现</span></td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>（可选）对 MoEMoKA 重复同样分析，验证模态分离 A 矩阵是否降低 R</td>
+    <td><span class="tag tag-warn">待讨论</span></td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td>（mark）确认按 attention layer 分层汇报 R(k) 是否增加过多计算量</td>
+    <td><span class="tag tag-info">mark</span></td>
+  </tr>
+</table>
+</div>
+
+<script>
+// ── Loss chart ────────────────────────────────────────────────────────────────
+const data = [[1,4.0623],[4,3.7165],[7,0.4776],[10,0.3961],[13,0.4897],[16,0.453],[19,0.1949],[22,0.2973],[25,0.3208],[28,0.2518],[31,0.2925],[34,0.2635],[37,0.2524],[40,0.3598],[43,0.2402],[46,0.2513],[49,0.2346],[52,0.2614],[55,0.2182],[58,0.2794],[61,0.2534],[64,0.2574],[67,0.1508],[70,0.2936],[73,0.2635],[76,0.2677],[79,0.2671],[82,0.1453],[85,0.1883],[88,0.1465],[91,0.1248],[94,0.3307],[97,0.1929],[100,0.2277],[103,0.1411],[106,0.1703],[109,0.2031],[112,0.1713],[115,0.1639],[118,0.1843],[121,0.1949],[124,0.1861],[127,0.1391],[130,0.2254],[133,0.1253],[136,0.1842],[139,0.1814],[142,0.2439],[145,0.1614],[148,0.1592],[151,0.1924],[154,0.1323],[157,0.0859],[160,0.1289],[163,0.128],[166,0.1436],[169,0.2272],[172,0.1323],[175,0.1214],[178,0.0652],[181,0.1756],[184,0.1119],[187,0.1472],[190,0.2071],[193,0.1373],[196,0.1226]];
+const canvas=document.getElementById('lossChart');
+const ctx=canvas.getContext('2d');
+canvas.width=860;canvas.height=220;
+const pad={l:50,r:20,t:20,b:40};
+const W=canvas.width-pad.l-pad.r,H=canvas.height-pad.t-pad.b;
+const xMin=1,xMax=198,yMin=0,yMax=4.5;
+const tx=x=>pad.l+(x-xMin)/(xMax-xMin)*W;
+const ty=y=>pad.t+H-(y-yMin)/(yMax-yMin)*H;
+ctx.fillStyle='#1e2328';ctx.fillRect(0,0,canvas.width,canvas.height);
+[0.5,1,1.5,2,3,4].forEach(y=>{ctx.strokeStyle='#1e2328';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,ty(y));ctx.lineTo(pad.l+W,ty(y));ctx.stroke();ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText(y.toFixed(1),pad.l-32,ty(y)+4);});
+[50,100,150,198].forEach(x=>{ctx.strokeStyle='#1e2328';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(tx(x),pad.t);ctx.lineTo(tx(x),pad.t+H);ctx.stroke();ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText(x,tx(x)-8,pad.t+H+16);});
+ctx.strokeStyle='#30363d';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(pad.l,pad.t);ctx.lineTo(pad.l,pad.t+H);ctx.lineTo(pad.l+W,pad.t+H);ctx.stroke();
+ctx.strokeStyle='#58a6ff';ctx.lineWidth=2;ctx.beginPath();data.forEach((d,i)=>{i===0?ctx.moveTo(tx(d[0]),ty(d[1])):ctx.lineTo(tx(d[0]),ty(d[1]));});ctx.stroke();
+data.forEach(d=>{ctx.fillStyle='#58a6ff';ctx.beginPath();ctx.arc(tx(d[0]),ty(d[1]),2.5,0,Math.PI*2);ctx.fill();});
+ctx.strokeStyle='rgba(63,185,80,.5)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(tx(30),ty(0.35));ctx.lineTo(tx(198),ty(0.35));ctx.stroke();ctx.setLineDash([]);
+ctx.fillStyle='rgba(63,185,80,.7)';ctx.font='9px monospace';ctx.fillText('~0.35 收敛平台',tx(32),ty(0.35)-5);
+ctx.fillStyle='rgba(63,185,80,.8)';ctx.font='9px monospace';ctx.fillText('final loss=0.11',tx(185),ty(0.11)-6);
+ctx.fillStyle='#6e7681';ctx.font='11px monospace';ctx.fillText('训练步骤 (gradient step)',pad.l+W/2-60,canvas.height-4);
+ctx.save();ctx.translate(12,pad.t+H/2+20);ctx.rotate(-Math.PI/2);ctx.fillText('Loss',0,0);ctx.restore();
+
+// ── Histogram ─────────────────────────────────────────────────────────────────
+(function(){
+const c=document.getElementById('histChart');if(!c)return;
+const ctx=c.getContext('2d');c.width=860;c.height=180;
+const labels=['0-5','5-10','10-20','20-30','30-50','50-100','100-200','200+'];
+const counts=[2646,4957,6663,3797,3952,2929,1127,165];
+const pad={l:50,r:20,t:20,b:35};
+const W=c.width-pad.l-pad.r,H=c.height-pad.t-pad.b;
+const maxC=Math.max(...counts);const bw=W/labels.length;
+ctx.fillStyle='#1e2328';ctx.fillRect(0,0,c.width,c.height);
+counts.forEach((v,i)=>{
+const bh=H*v/maxC;
+const hue=i<3?'rgba(88,166,255,.7)':i<5?'rgba(240,136,62,.7)':'rgba(248,81,73,.7)';
+ctx.fillStyle=hue;ctx.fillRect(pad.l+i*bw+2,pad.t+H-bh,bw-4,bh);
+ctx.fillStyle='#6e7681';ctx.font='9px monospace';ctx.fillText(labels[i],pad.l+i*bw+2,pad.t+H+14);
+if(v>500){ctx.fillStyle='#c9d1d9';ctx.font='9px monospace';ctx.fillText(v.toLocaleString(),pad.l+i*bw+4,pad.t+H-bh-4);}
+});
+ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.strokeRect(pad.l,pad.t,W,H);
+ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText('R_A 区间',pad.l+W/2-20,c.height-2);
+ctx.fillStyle='#3fb950';ctx.font='9px monospace';ctx.fillText('← 蓝=正常 橙=高 红=极高',pad.l+4,pad.t+12);
+})();
+
+// ── Time series ───────────────────────────────────────────────────────────────
+(function(){
+const c=document.getElementById('tsChart');if(!c)return;
+const ctx=c.getContext('2d');c.width=860;c.height=180;
+const tsData=[[5,17.28],[10,18.75],[15,28.05],[25,27.53],[30,38.32],[40,29.82],[60,35.32],[65,40.3],[70,33.58],[75,33.66],[85,29.37],[115,34.72],[120,41.42],[145,30.45],[155,24.51],[160,28.65],[170,36.23],[180,27.8],[190,30.6],[195,24.4]];
+const pad={l:50,r:20,t:20,b:35};
+const W=c.width-pad.l-pad.r,H=c.height-pad.t-pad.b;
+const xMin=0,xMax=198,yMin=0,yMax=50;
+const tx=x=>pad.l+(x-xMin)/(xMax-xMin)*W;
+const ty=y=>pad.t+H-(y-yMin)/(yMax-yMin)*H;
+ctx.fillStyle='#1e2328';ctx.fillRect(0,0,c.width,c.height);
+[10,20,30,40].forEach(y=>{ctx.strokeStyle='#1e2328';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,ty(y));ctx.lineTo(pad.l+W,ty(y));ctx.stroke();ctx.fillStyle='#6e7681';ctx.font='9px monospace';ctx.fillText(y,pad.l-22,ty(y)+3);});
+ctx.strokeStyle='rgba(63,185,80,.4)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(pad.l,ty(1));ctx.lineTo(pad.l+W,ty(1));ctx.stroke();ctx.setLineDash([]);
+const mean=29.72;ctx.strokeStyle='rgba(88,166,255,.3)';ctx.lineWidth=1;ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(pad.l,ty(mean));ctx.lineTo(pad.l+W,ty(mean));ctx.stroke();ctx.setLineDash([]);
+ctx.fillStyle='rgba(88,166,255,.6)';ctx.font='9px monospace';ctx.fillText('mean=29.7→',pad.l+W-70,ty(mean)-4);
+ctx.strokeStyle='#f0883e';ctx.lineWidth=2;ctx.beginPath();tsData.forEach((d,i)=>{i===0?ctx.moveTo(tx(d[0]),ty(d[1])):ctx.lineTo(tx(d[0]),ty(d[1]));});ctx.stroke();
+tsData.forEach(d=>{ctx.fillStyle='#f0883e';ctx.beginPath();ctx.arc(tx(d[0]),ty(d[1]),3,0,Math.PI*2);ctx.fill();});
+ctx.strokeStyle='#30363d';ctx.lineWidth=1.5;ctx.strokeRect(pad.l,pad.t,W,H);
+ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText('训练步骤',pad.l+W/2-20,c.height-4);
+ctx.fillStyle='#3fb950';ctx.font='9px monospace';ctx.fillText('R_A>1 全程成立',pad.l+4,pad.t+12);
+})();
+
+// ── Layer bar ─────────────────────────────────────────────────────────────────
+(function(){
+const c=document.getElementById('layerChart');if(!c)return;
+const ctx=c.getContext('2d');c.width=860;c.height=160;
+const ltData=[['v_proj',9.6],['k_proj',9.1],['q_proj',12.0],['gate_proj',13.9],['up_proj',16.4],['down_proj',28.3],['o_proj',34.0]];
+const pad={l:80,r:20,t:20,b:30};
+const W=c.width-pad.l-pad.r,H=c.height-pad.t-pad.b;
+const maxV=40;const bh=H/ltData.length;
+ctx.fillStyle='#1e2328';ctx.fillRect(0,0,c.width,c.height);
+ltData.forEach(([lt,v],i)=>{
+const bw=W*v/maxV;
+const col=v<15?'rgba(88,166,255,.7)':v<25?'rgba(240,136,62,.7)':'rgba(248,81,73,.7)';
+ctx.fillStyle=col;ctx.fillRect(pad.l,pad.t+i*bh+2,bw,bh-4);
+ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText(lt,pad.l-78,pad.t+i*bh+bh/2+4);
+ctx.fillStyle='#c9d1d9';ctx.font='10px monospace';ctx.fillText(v.toFixed(1),pad.l+bw+4,pad.t+i*bh+bh/2+4);
+});
+ctx.strokeStyle='#30363d';ctx.lineWidth=1.5;ctx.strokeRect(pad.l,pad.t,W,H);
+ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText('median R_A',pad.l+W/2-30,c.height-4);
+})();
+</script>
+
+<p style="color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center">
+  CoIN · grad 分支 · ModalGradientLogger · 2026-06-04<br>
+  两个旧文件：<code>grad_analysis_review.html</code>（实验回顾）· <code>gradient_decomp_explainer.html</code>（基础教学）已合并到本文件
+</p>
+</body>
+</html>

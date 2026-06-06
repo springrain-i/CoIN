@@ -7,7 +7,7 @@ import shortuuid
 
 # SDPA monkey patch must be applied before any transformers model is loaded.
 if os.environ.get("COIN_USE_SDPA_PATCH", "0") == "1":
-    from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
+    from ETrain.Train.LLaVA.attn_sdpa_eval import replace_llama_attn_with_sdpa
     replace_llama_attn_with_sdpa()
 
 from ETrain.utils.LLaVA.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN

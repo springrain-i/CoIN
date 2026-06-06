@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoELoRA 向量化 Forward — 技术讲解</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0b0d0f;
+    --bg2:       #111417;
+    --bg3:       #171b1f;
+    --border:    #1e2328;
+    --border2:   #252a30;
+    --text:      #c8d0d8;
+    --text-dim:  #5a6370;
+    --text-mid:  #8c97a4;
+    --amber:     #f0a500;
+    --amber-dim: #7a5200;
+    --red:       #e05252;
+    --green:     #3fb950;
+    --blue:      #58a6ff;
+    --purple:    #bc8cff;
+    --cyan:      #39c5cf;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.06) 2px, rgba(0,0,0,.06) 4px);
+  }
+
+  header {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(11,13,15,.94);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 52px;
+  }
+  .logo { font-family: var(--sans); font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--amber); }
+  .header-title { font-size: 12px; color: var(--text-mid); letter-spacing: .04em; }
+  .header-meta { font-size: 11px; color: var(--text-dim); }
+
+  .layout { display: grid; grid-template-columns: 230px 1fr; min-height: calc(100vh - 52px); position: relative; z-index: 1; }
+
+  aside {
+    border-right: 1px solid var(--border);
+    padding: 2rem 0;
+    position: sticky; top: 52px; height: calc(100vh - 52px);
+    overflow-y: auto;
+  }
+  .nav-section { margin-bottom: 1.8rem; }
+  .nav-label { font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: var(--text-dim); padding: 0 1.5rem; margin-bottom: .5rem; }
+  .nav-item {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .35rem 1.5rem;
+    font-size: 12px; color: var(--text-mid);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: all .15s;
+  }
+  .nav-item:hover { color: var(--text); background: var(--bg2); border-left-color: var(--border2); }
+  .nav-item.active { color: var(--amber); border-left-color: var(--amber); background: rgba(240,165,0,.06); }
+  .nav-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+
+  main { padding: 3rem 3.5rem; max-width: 900px; }
+
+  /* ── HERO ── */
+  .hero { margin-bottom: 3rem; }
+  .hero-eyebrow { font-size: 11px; letter-spacing: .2em; text-transform: uppercase; color: var(--text-dim); margin-bottom: .8rem; }
+  .hero-title { font-family: var(--sans); font-size: 32px; font-weight: 800; line-height: 1.1; color: #e8edf2; margin-bottom: 1rem; }
+  .hero-title span { color: var(--amber); }
+  .hero-desc { font-size: 13px; color: var(--text-mid); max-width: 560px; line-height: 1.8; }
+
+  /* ── SECTION ── */
+  .section { margin-bottom: 3.5rem; }
+  .section-header {
+    display: flex; align-items: baseline; gap: 1rem;
+    margin-bottom: 1.5rem; padding-bottom: .75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-num { font-size: 10px; letter-spacing: .15em; color: var(--text-dim); }
+  .section-title { font-family: var(--sans); font-size: 18px; font-weight: 700; color: #dde4ec; }
+
+  p { font-size: 13px; color: var(--text); line-height: 1.8; margin-bottom: .9rem; }
+  strong { color: #e8edf2; font-weight: 600; }
+  em { color: var(--amber); font-style: normal; }
+
+  /* ── CODE ── */
+  pre {
+    background: #0d1117; border: 1px solid var(--border2);
+    padding: 1.1rem 1.3rem; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    margin: .8rem 0 1.2rem;
+    position: relative;
+  }
+  .pre-label {
+    position: absolute; top: 0; right: 0;
+    font-size: 10px; color: var(--text-dim); background: var(--bg3);
+    padding: 2px 8px; border-bottom-left-radius: 4px;
+    letter-spacing: .08em;
+  }
+  code { font-family: var(--mono); font-size: 12px; }
+  .cm  { color: #5a6c7d; }
+  .ck  { color: #ff7b72; }
+  .cs  { color: #a5d6ff; }
+  .cn  { color: #79c0ff; }
+  .co  { color: #ffa657; }
+  .cp  { color: var(--purple); }
+  .cc  { color: var(--cyan); }
+
+  /* highlight row */
+  .hl  { background: rgba(240,165,0,.10); display: block; margin: 0 -1.3rem; padding: 0 1.3rem; }
+  .hl2 { background: rgba(63,185,80,.08);  display: block; margin: 0 -1.3rem; padding: 0 1.3rem; }
+  .hl3 { background: rgba(88,166,255,.08); display: block; margin: 0 -1.3rem; padding: 0 1.3rem; }
+
+  /* ── ALERT ── */
+  .alert {
+    border-left: 3px solid; padding: 1rem 1.2rem;
+    margin-bottom: 1.2rem; background: var(--bg2);
+    font-size: 13px; line-height: 1.65;
+  }
+  .alert.ok    { border-color: var(--green);  background: rgba(63,185,80,.06); }
+  .alert.info  { border-color: var(--blue);   background: rgba(88,166,255,.06); }
+  .alert.warn  { border-color: var(--amber);  background: rgba(240,165,0,.06); }
+  .alert.purple{ border-color: var(--purple); background: rgba(188,140,255,.06); }
+  .alert-head { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .4rem; }
+  .alert.ok     .alert-head { color: var(--green); }
+  .alert.info   .alert-head { color: var(--blue); }
+  .alert.warn   .alert-head { color: var(--amber); }
+  .alert.purple .alert-head { color: var(--purple); }
+
+  /* ── TABLE ── */
+  .table-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { background: var(--bg3); color: var(--text-dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; padding: .6rem 1rem; text-align: left; border-bottom: 1px solid var(--border2); }
+  td { padding: .55rem 1rem; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── SHAPE BOX ── */
+  .shape-flow {
+    display: flex; align-items: center; gap: .6rem;
+    flex-wrap: wrap; margin: .8rem 0 1.2rem;
+    font-size: 12px;
+  }
+  .shape {
+    background: var(--bg3); border: 1px solid var(--border2);
+    padding: .3rem .7rem; border-radius: 4px;
+    font-weight: 600; color: var(--text);
+  }
+  .shape.amber { border-color: var(--amber-dim); color: var(--amber); background: rgba(240,165,0,.08); }
+  .shape.blue  { border-color: #1e3a5f; color: var(--blue); background: rgba(88,166,255,.08); }
+  .shape.green { border-color: #1a3a1f; color: var(--green); background: rgba(63,185,80,.08); }
+  .shape.purple{ border-color: #3a2a5f; color: var(--purple); background: rgba(188,140,255,.08); }
+  .arrow { color: var(--text-dim); font-size: 14px; }
+
+  /* ── INDEX LEGEND ── */
+  .idx-table { display: grid; grid-template-columns: auto auto 1fr; gap: .3rem .8rem; font-size: 12px; margin: .6rem 0 1rem; }
+  .idx-char { font-weight: 700; color: var(--cyan); font-size: 14px; text-align: center; }
+  .idx-size { color: var(--amber); font-weight: 600; }
+  .idx-desc { color: var(--text-mid); }
+
+  /* ── COMPARE ── */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); border: 1px solid var(--border); margin-bottom: 1.5rem; }
+  .compare-col { background: var(--bg2); padding: 1rem 1.2rem; }
+  .compare-label { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: .6rem; font-weight: 700; }
+  .compare-label.bad  { color: var(--red); }
+  .compare-label.good { color: var(--green); }
+
+  /* ── FILE PATH ── */
+  .filepath {
+    display: inline-flex; align-items: center; gap: .5rem;
+    background: var(--bg3); border: 1px solid var(--border2);
+    padding: .3rem .8rem; border-radius: 4px; font-size: 11.5px;
+    color: var(--text-mid); margin-bottom: .6rem;
+  }
+  .filepath .icon { color: var(--text-dim); font-size: 10px; }
+  .filepath code { color: var(--cyan); }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top: 1px solid var(--border); padding: 1.5rem 3.5rem;
+    font-size: 11px; color: var(--text-dim);
+    display: flex; justify-content: space-between; align-items: center;
+    position: relative; z-index: 1;
+  }
+
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .section { animation: fadeUp .4s ease both; }
+  .section:nth-child(1) { animation-delay: .05s; }
+  .section:nth-child(2) { animation-delay: .10s; }
+  .section:nth-child(3) { animation-delay: .15s; }
+  .section:nth-child(4) { animation-delay: .20s; }
+  .section:nth-child(5) { animation-delay: .25s; }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  h3 { font-family: var(--sans); font-size: 15px; font-weight: 700; color: #c8d4e0; margin: 1.4rem 0 .6rem; }
+  ul, ol { padding-left: 1.4rem; margin-bottom: .9rem; }
+  li { font-size: 13px; color: var(--text); line-height: 1.8; margin-bottom: .2rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex;align-items:center;gap:1rem">
+    <span class="logo">CoIN · MoELoRA</span>
+    <span style="color:var(--border2)">/</span>
+    <span class="header-title">向量化 Forward 技术讲解</span>
+  </div>
+  <span class="header-meta">optimize 分支 · 2026-05-29</span>
+</header>
+
+<div class="layout">
+<aside>
+  <div class="nav-section">
+    <div class="nav-label">总览</div>
+    <a class="nav-item active" href="#arch">架构总览</a>
+    <a class="nav-item" href="#location">代码位置</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">核心实现</div>
+    <a class="nav-item" href="#loop">原始 Loop 实现</a>
+    <a class="nav-item" href="#vectorized">向量化实现</a>
+    <a class="nav-item" href="#einsum">einsum 符号详解</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">深入理解</div>
+    <a class="nav-item" href="#why-faster">为什么更快</a>
+    <a class="nav-item" href="#shapes">完整 shape 推导</a>
+    <a class="nav-item" href="#usage">在 eval 中使用</a>
+  </div>
+</aside>
+
+<main>
+
+<div class="hero">
+  <div class="hero-eyebrow">// 技术原理 · 代码精读 · 工程分析</div>
+  <h1 class="hero-title">MoELoRA 向量化 Forward<br><span>从 8× Python Loop 到 2× einsum</span></h1>
+  <p class="hero-desc">
+    CoIN 使用 MoE-LoRA（混合专家 LoRA），原始实现对 8 个专家逐一串行计算，造成 8× Python dispatch 开销。
+    optimize 分支将其改写为 <strong>2 个 batched einsum</strong>，让 GPU 一次性处理全部专家，
+    推理加速 <strong style="color:var(--green)">1.48～1.61×</strong>（batch=1，300 样本）。
+  </p>
+</div>
+
+<!-- ═══ 01 架构总览 ═══ -->
+<div id="arch" class="section">
+  <div class="section-header">
+    <span class="section-num">01</span>
+    <h2 class="section-title">架构总览 — MoELoRA 是什么</h2>
+  </div>
+
+  <p>
+    MoELoRA = MoE（Mixture of Experts，混合专家） + LoRA（Low-Rank Adaptation，低秩适配）。
+    对 LLM 中每一个线性层（如 q_proj、v_proj），原始 LoRA 加一对低秩矩阵 A、B；
+    MoELoRA 加 <strong>N 对</strong>，由一个 Router（门控）动态决定每个 token 用哪几个专家。
+  </p>
+
+  <h3>结构图（以 q_proj 为例）</h3>
+  <div class="alert info" style="margin-bottom:1.2rem">
+    <div class="alert-head">模型配置 · 7B Vicuna · lora_r=128 · expert_num=8</div>
+    <div style="font-size:12px;margin-top:.4rem">
+      每个专家分得 r_per = 128 / 8 = <strong style="color:var(--amber)">16</strong> 的 rank。
+      q_proj 的 d_in = d_out = <strong>4096</strong>。
+    </div>
+  </div>
+
+<pre><span class="cm">┌─────────────────────────────────────────────────────────────────┐
+│                  CoINMOELoraLinear (q_proj)                     │
+│                                                                  │
+│  输入 x: (B, T, 4096)                                            │
+│     │                                                            │
+│     ├──→ W·x  (冻结的 7B 预训练权重，4096→4096)                  │
+│     │                                                            │
+│     └──→ Router: x → Linear(4096→8) → softmax → (B,T,8) 权重   │
+│           │                                                      │
+│           └──→ LoRA 路径（8 个专家并行）                         │
+│                  Expert 0: A₀(4096→16) → B₀(16→4096)           │
+│                  Expert 1: A₁(4096→16) → B₁(16→4096)           │
+│                  ...                                             │
+│                  Expert 7: A₇(4096→16) → B₇(16→4096)           │
+│                  → 加权求和: Σᵢ router_score_i × Bᵢ(Aᵢ(x))     │
+│                  → × scaling (= lora_alpha / r = 1.0)            │
+│                                                                  │
+│  输出 = W·x + Σᵢ router_i × scaling × Bᵢ(Aᵢ(x))               │
+└─────────────────────────────────────────────────────────────────┘</span></pre>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>组件</th><th>类名</th><th>形状</th><th>是否可训练</th></tr></thead>
+    <tbody>
+      <tr><td>预训练权重</td><td><code>nn.Linear.weight</code></td><td>(d_out, d_in) = (4096, 4096)</td><td style="color:var(--red)">✗ 冻结</td></tr>
+      <tr><td>Router（门控）</td><td><code>lora_router[adapter]</code></td><td>(d_in, N) = (4096, 8)</td><td style="color:var(--green)">✓ 可训练</td></tr>
+      <tr><td>LoRA A（8 个）</td><td><code>lora_A[adapter].loraA[i].mlp.weight</code></td><td>每个 (r_per, d_in) = (16, 4096)</td><td style="color:var(--green)">✓ 可训练</td></tr>
+      <tr><td>LoRA B（8 个）</td><td><code>lora_B[adapter].loraB[i].mlp.weight</code></td><td>每个 (d_out, r_per) = (4096, 16)</td><td style="color:var(--green)">✓ 可训练</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="alert ok">
+    <div class="alert-head">为什么 LoRA A 是 (r_per, d_in) 而不是 (d_in, r_per)？</div>
+    PyTorch <code>nn.Linear(in, out)</code> 的权重矩阵存储为 <code>(out, in)</code>，方便做 <code>y = W @ x.T</code>。
+    所以 A (d_in → r_per) 的 weight 是 (r_per, d_in)，B (r_per → d_out) 的 weight 是 (d_out, r_per)。
+    einsum 里会用到这个约定。
+  </div>
+</div>
+
+<!-- ═══ 02 代码位置 ═══ -->
+<div id="location" class="section">
+  <div class="section-header">
+    <span class="section-num">02</span>
+    <h2 class="section-title">代码位置 — 具体文件和行</h2>
+  </div>
+
+  <p>所有改动在 <strong>optimize 分支</strong>（已推送到 <code>origin/optimize</code>）。主文件：</p>
+
+  <div class="filepath"><span class="icon">FILE</span><code>CoIN/peft/tuners/coinmoelora.py</code></div>
+  <p style="font-size:12px;color:var(--text-dim);margin-top:.2rem;margin-bottom:1rem">
+    路径相对于仓库根目录 <code>/data4/home/sqx/CoIN/</code> ·
+    查看方法：<code>git show origin/optimize:CoIN/peft/tuners/coinmoelora.py</code>
+  </p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>行范围（optimize 分支）</th><th>内容</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>296–308</strong></td>
+        <td><code>_moe_lora_compute()</code> 函数</td>
+        <td>核心 einsum 计算，独立函数方便 <code>torch.compile</code> 捕获</td>
+      </tr>
+      <tr>
+        <td><strong>310–318</strong></td>
+        <td><code>_moe_lora_compute_compiled</code></td>
+        <td>可选 compile 路径，由 <code>COIN_USE_COMPILED_LORA</code> 控制，默认关闭</td>
+      </tr>
+      <tr>
+        <td><strong>358–360</strong></td>
+        <td><code>__init__</code> 中读取环境变量</td>
+        <td><code>COIN_USE_VECTORIZED_LORA</code>，默认 "1"（开启）</td>
+      </tr>
+      <tr>
+        <td><strong>401–413</strong></td>
+        <td><code>_lora_vectorized()</code> 方法</td>
+        <td>stack 权重 + 调用 compute 函数</td>
+      </tr>
+      <tr>
+        <td><strong>415–450</strong></td>
+        <td><code>forward()</code> 方法</td>
+        <td>完整 forward：基础权重 + LoRA 两条路径（vectorized / loop 通过 env 切换）</td>
+      </tr>
+      <tr>
+        <td><strong>436–441</strong></td>
+        <td><code>else</code> 分支（原始 loop）</td>
+        <td>保留原始实现，<code>COIN_USE_VECTORIZED_LORA=0</code> 时走这里，用于 A/B 对比测试</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="alert warn">
+    <div class="alert-head">注意：MoEMoKA 分支（main）不含向量化</div>
+    当前 <code>MoEMoKA</code> 分支的 coinmoelora.py 仍是原始 loop 版本。
+    向量化代码只在 <code>optimize</code> 分支，使用前需切换分支或 cherry-pick。
+  </div>
+</div>
+
+<!-- ═══ 03 原始 Loop 实现 ═══ -->
+<div id="loop" class="section">
+  <div class="section-header">
+    <span class="section-num">03</span>
+    <h2 class="section-title">原始 Loop 实现 — 逐行注释</h2>
+  </div>
+
+  <p>以下是 <code>forward()</code> 中的 LoRA 计算核心部分（optimize 分支的 <strong>else 分支</strong>，行 ~436）：</p>
+
+<pre><span class="cm"># ── 第一步：把输入投影到 LoRA 路径 ──────────────────────────────
+# x 原始输入 (B, T, d_in)，先转到 lora_A 的参数 dtype（通常 bf16）</span>
+x = x.to(<span class="co">self</span>.lora_A[active].loraA[<span class="co">0</span>].weight.dtype)
+
+<span class="cm"># _apply_token_mask: 只对文字 token 或视觉 token 做 LoRA（由 lora_mode 控制）
+# lora_x 形状仍是 (B, T, d_in)，但部分 token 已被清零</span>
+lora_x, _ = <span class="co">self</span>._apply_token_mask(x)
+lora_x = <span class="co">self</span>.lora_dropout[active](lora_x)   <span class="cm"># dropout（推理时是 Identity，无效）</span>
+
+<span class="cm"># ── 第二步：Router 计算 (B,T,d_in) → (B,T,N) ────────────────────</span>
+<span class="co">self</span>.lora_router = <span class="co">self</span>.lora_router.to(lora_x.device)
+router = <span class="co">self</span>.lora_router[active](lora_x)   <span class="cm"># Linear(d_in, N)，结果 (B,T,8)</span>
+router = torch.softmax(router, dim=-1)       <span class="cm"># 归一化为权重，每个 token 对 8 个专家的分配比例</span>
+
+<span class="cm"># ── 第三步：8 次串行 LoRA 计算 ─────────────────────────────────
+# 每次循环：
+#   loraA[i](lora_x)  → Linear(d_in=4096, r_per=16) → (B, T, 16)
+#   loraB[i](上面)    → Linear(r_per=16, d_out=4096) → (B, T, 4096)
+#   × scaling         → 标量乘法 (= lora_alpha / r = 1.0)
+#   × router[:,:,i].unsqueeze(-1) → 取第 i 个专家的权重 (B,T,1)，广播
+#
+# 问题：8 次循环 = 16 次单独 CUDA kernel launch（每次 loraA + loraB 各一次）
+#       + 8 次 Python for 循环开销
+#       + 16 次 GPU 显存读写（每次 kernel 都要读权重、写中间结果）</span>
+<span class="hl">for i in range(<span class="co">self</span>.expert_num):   <span class="cm"># 8 次串行，无法并行</span></span>
+<span class="hl">    result += (</span>
+<span class="hl">        <span class="co">self</span>.lora_B[active].loraB[i](          <span class="cm"># B 矩阵：(B,T,16) → (B,T,4096)</span></span>
+<span class="hl">            <span class="co">self</span>.lora_A[active].loraA[i](lora_x),  <span class="cm"># A 矩阵：(B,T,4096) → (B,T,16)</span></span>
+<span class="hl">        )</span>
+<span class="hl">        * <span class="co">self</span>.scaling[active]                   <span class="cm"># 标量</span></span>
+<span class="hl">        * router[:,:,i].unsqueeze(-1)             <span class="cm"># 专家权重 (B,T,1)</span></span>
+<span class="hl">    )</span></pre>
+
+  <div class="alert warn">
+    <div class="alert-head">性能问题的根源</div>
+    <ul style="margin:.3rem 0 0 1.2rem;line-height:1.8;font-size:13px">
+      <li>16 次 CUDA kernel launch（每次都有 μs 级的 CPU↔GPU 同步开销）</li>
+      <li>Python 解释器逐行执行循环，GIL 锁住，无法并发</li>
+      <li>中间结果 <code>(B, T, 16)</code> 反复在 GPU 显存读写（8 次 × 2）</li>
+      <li>GPU 实际利用率低：单个 expert 的矩阵太小（16 维），CUDA core 大量空转</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══ 04 向量化实现 ═══ -->
+<div id="vectorized" class="section">
+  <div class="section-header">
+    <span class="section-num">04</span>
+    <h2 class="section-title">向量化实现 — 逐行注释</h2>
+  </div>
+
+  <p>核心改动：把所有专家的权重 <strong>堆叠成 3D 张量</strong>，然后用 <code>einsum</code> 一次性完成所有专家的计算。</p>
+
+  <h3>① 权重堆叠（stack trick）</h3>
+
+<pre><span class="cm"># ── _lora_vectorized() 方法（行 ~401）───────────────────────────
+# active = self.active_adapter（适配器名称，如 "default"）
+
+# 把 8 个 A 矩阵从 list[Tensor(16, 4096)] 堆叠成 Tensor(8, 16, 4096)</span>
+<span class="hl">A = torch.stack([m.mlp.weight <span class="ck">for</span> m <span class="ck">in</span> <span class="co">self</span>.lora_A[active].loraA], dim=<span class="co">0</span>)</span>
+<span class="cm"># m.mlp.weight 就是 CoINMOEExpert.mlp（nn.Linear）的权重矩阵
+# 每个是 (r_per, d_in) = (16, 4096)
+# stack 8 个 → (N, r_per, d_in) = (8, 16, 4096)
+# 注意：stack 在这里不占额外显存（view/指针，不复制数据）</span>
+
+<span class="hl">B = torch.stack([m.mlp.weight <span class="ck">for</span> m <span class="ck">in</span> <span class="co">self</span>.lora_B[active].loraB], dim=<span class="co">0</span>)</span>
+<span class="cm"># 每个 B 是 (d_out, r_per) = (4096, 16)
+# stack 8 个 → (N, d_out, r_per) = (8, 4096, 16)</span></pre>
+
+  <h3>② _moe_lora_compute：2 个 einsum + 加权求和</h3>
+
+<pre><span class="cm"># ── _moe_lora_compute() 独立函数（行 ~296）────────────────────
+# 参数：
+#   lora_x : (B, T, d_in)  = (4, 500, 4096)  输入
+#   A      : (N, r_per, d_in) = (8, 16, 4096) A 权重
+#   B      : (N, d_out, r_per) = (8, 4096, 16) B 权重
+#   router : (B, T, N)    = (4, 500, 8)  路由权重（softmax 后）
+#   scaling: float        = 1.0
+
+<span class="cm"># ─── Einsum 1：A 投影 ────────────────────────────────────────</span>
+<span class="hl2">out_A = torch.einsum(<span class="cs">'bti,nri->btnr'</span>, lora_x, A)</span>
+<span class="cm"># 输入：lora_x (B,T,i=d_in), A (N,r=r_per,i=d_in)
+# 输出：out_A (B,T,N,r=r_per) = (4, 500, 8, 16)
+# 含义：对每个 batch、每个 token、每个专家，计算 A_n @ x_t
+# 等价于：out_A[b,t,n,:] = A[n,:,:] @ lora_x[b,t,:]</span>
+
+<span class="cm"># ─── Einsum 2：B 投影 ────────────────────────────────────────</span>
+<span class="hl2">out_B = torch.einsum(<span class="cs">'btnr,nor->btno'</span>, out_A, B)</span>
+<span class="cm"># 输入：out_A (B,T,N,r=r_per), B (N,o=d_out,r=r_per)
+# 输出：out_B (B,T,N,o=d_out) = (4, 500, 8, 4096)
+# 含义：对每个 batch、token、专家，计算 B_n @ (A_n @ x_t)
+# 等价于：out_B[b,t,n,:] = B[n,:,:] @ out_A[b,t,n,:]</span>
+
+<span class="cm"># ─── 加权求和：按 router 权重聚合 8 个专家输出 ─────────────</span>
+<span class="hl3">return (out_B * router.unsqueeze(-1)).sum(dim=<span class="co">2</span>) * scaling</span>
+<span class="cm"># router.unsqueeze(-1): (B,T,8) → (B,T,8,1)，广播到 (B,T,8,4096)
+# out_B * router.unsqueeze(-1): 每个专家的输出乘以其路由权重
+# .sum(dim=2): 在 N=8 这个维度求和 → (B, T, 4096)
+# * scaling: 乘以 lora_alpha/r 的缩放因子
+# 最终 shape: (B, T, d_out) = (4, 500, 4096)</span></pre>
+
+  <div class="alert ok">
+    <div class="alert-head">关键变化：16 次 kernel 变为 2 次</div>
+    <ul style="margin:.3rem 0 0 1.2rem;line-height:1.8;font-size:13px">
+      <li>原始：16 次 CUDA kernel（8 × loraA + 8 × loraB）</li>
+      <li>向量化：<strong>2 次 einsum kernel</strong>，GPU 一次性处理所有 8 个专家的矩阵乘法</li>
+      <li>矩阵变大：从 8×(B,T,16)@(16,4096) 变成一次 (B,T,8,16)@(8,16,4096)，GPU 利用率更高</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══ 05 einsum 详解 ═══ -->
+<div id="einsum" class="section">
+  <div class="section-header">
+    <span class="section-num">05</span>
+    <h2 class="section-title">einsum 符号详解 — 从零理解</h2>
+  </div>
+
+  <p>
+    <code>torch.einsum(subscript, A, B)</code> 用字母代表维度，通过下标公式描述张量运算。
+    规则：<strong>出现在输入但不在输出里的字母 → 在那个维度上求和（收缩）</strong>。
+  </p>
+
+  <h3>第一个 einsum：<code>'bti,nri->btnr'</code></h3>
+
+  <div class="idx-table">
+    <div class="idx-char">b</div><div class="idx-size">= B = 4</div><div class="idx-desc">batch 维度（输出保留）</div>
+    <div class="idx-char">t</div><div class="idx-size">= T = 500</div><div class="idx-desc">序列长度/token 数（输出保留）</div>
+    <div class="idx-char" style="color:var(--red)">i</div><div class="idx-size" style="color:var(--red)">= d_in = 4096</div><div class="idx-desc" style="color:var(--red)">输入特征维度 ← <strong>这个被求和掉（收缩）</strong></div>
+    <div class="idx-char">n</div><div class="idx-size">= N = 8</div><div class="idx-desc">专家数量（输出保留）</div>
+    <div class="idx-char">r</div><div class="idx-size">= r_per = 16</div><div class="idx-desc">每专家 rank（输出保留）</div>
+  </div>
+
+<pre><span class="cm"># lora_x[b, t, i] × A[n, r, i] → out_A[b, t, n, r]
+# "i" 出现在两个输入但不在输出：沿 d_in=4096 做点积（矩阵乘法）
+# 等价写法（循环展开）：
+</span><span class="ck">for</span> b <span class="ck">in</span> range(B):
+    <span class="ck">for</span> t <span class="ck">in</span> range(T):
+        <span class="ck">for</span> n <span class="ck">in</span> range(N):
+            <span class="ck">for</span> r <span class="ck">in</span> range(r_per):
+                out_A[b,t,n,r] = sum(lora_x[b,t,i] * A[n,r,i] <span class="ck">for</span> i <span class="ck">in</span> range(d_in))
+<span class="cm"># 上面这 4 层循环全部被 einsum 合并成 1 次 GPU kernel</span></pre>
+
+  <div class="shape-flow">
+    <div class="shape amber">lora_x<br><small>(B, T, <span style="color:var(--red)">i</span>)</small></div>
+    <div class="arrow">⊗</div>
+    <div class="shape blue">A<br><small>(N, r, <span style="color:var(--red)">i</span>)</small></div>
+    <div class="arrow">→ 沿 i 收缩 →</div>
+    <div class="shape green">out_A<br><small>(B, T, N, r)</small></div>
+  </div>
+
+  <h3>第二个 einsum：<code>'btnr,nor->btno'</code></h3>
+
+  <div class="idx-table">
+    <div class="idx-char">b</div><div class="idx-size">= B = 4</div><div class="idx-desc">batch（输出保留）</div>
+    <div class="idx-char">t</div><div class="idx-size">= T = 500</div><div class="idx-desc">序列长度（输出保留）</div>
+    <div class="idx-char">n</div><div class="idx-size">= N = 8</div><div class="idx-desc">专家数（输出保留）</div>
+    <div class="idx-char" style="color:var(--red)">r</div><div class="idx-size" style="color:var(--red)">= r_per = 16</div><div class="idx-desc" style="color:var(--red)">rank 维度 ← <strong>这个被求和掉（收缩）</strong></div>
+    <div class="idx-char">o</div><div class="idx-size">= d_out = 4096</div><div class="idx-desc">输出特征维度（输出保留）</div>
+  </div>
+
+<pre><span class="cm"># out_A[b, t, n, r] × B[n, o, r] → out_B[b, t, n, o]
+# "r" 被收缩：对 r_per=16 个中间维度做点积
+# 等价于对每个 (b,t,n)：out_B[b,t,n,:] = B[n,:,:] @ out_A[b,t,n,:]
+#                                            (4096,16) @ (16,) → (4096,)</span></pre>
+
+  <div class="shape-flow">
+    <div class="shape green">out_A<br><small>(B, T, N, <span style="color:var(--red)">r</span>)</small></div>
+    <div class="arrow">⊗</div>
+    <div class="shape purple">B<br><small>(N, o, <span style="color:var(--red)">r</span>)</small></div>
+    <div class="arrow">→ 沿 r 收缩 →</div>
+    <div class="shape amber">out_B<br><small>(B, T, N, o)</small></div>
+  </div>
+
+  <div class="alert purple">
+    <div class="alert-head">einsum vs matmul：什么时候用 einsum？</div>
+    <ul style="margin:.3rem 0 0 1.2rem;line-height:1.8;font-size:13px">
+      <li><code>matmul</code>/@：只能做 (..., m, k) × (..., k, n) 的标准矩阵乘法</li>
+      <li><code>einsum</code>：可以自由指定哪些维度收缩、哪些保留、哪些广播，表达力更强</li>
+      <li>这里用 einsum 的原因：输入是 3D/4D，需要"对每个专家分别做矩阵乘"——einsum 比 for + matmul 更清晰也更高效</li>
+      <li>底层 PyTorch 会把 einsum 编译为 <code>bmm</code>（批量矩阵乘）或 <code>contraction</code>，仍然是单次 CUDA kernel</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══ 06 为什么更快 ═══ -->
+<div id="why-faster" class="section">
+  <div class="section-header">
+    <span class="section-num">06</span>
+    <h2 class="section-title">为什么更快 — GPU 执行模型</h2>
+  </div>
+
+  <div class="compare">
+    <div class="compare-col">
+      <div class="compare-label bad">原始 Loop（慢）</div>
+      <pre style="margin:0;font-size:11.5px;border:none;padding:.5rem 0;background:transparent"><span class="cm"># 每次迭代：
+# 1. Python 解释器进入循环
+# 2. CPU 向 CUDA 发送 kernel 调用请求
+# 3. GPU 执行 (16,4096) × (B,T,4096)
+#    → 矩阵太小，SM 大量空转
+# 4. GPU → CPU 同步（等待结果）
+# 5. 重复 16 次</span>
+
+<span class="cm"># 时间线（粗略）：
+# CPU: [py][kernel₁][py][kernel₂]...×16
+# GPU:  ──[k₁]──  ──[k₂]──  ...×16
+#           ^ 空隙：等待 CPU dispatch</span></pre>
+    </div>
+    <div class="compare-col">
+      <div class="compare-label good">向量化 einsum（快）</div>
+      <pre style="margin:0;font-size:11.5px;border:none;padding:.5rem 0;background:transparent"><span class="cm"># 2 次 kernel：
+# 1. CPU dispatch einsum₁
+#    GPU 执行 (8,16,4096) × (B,T,4096)
+#    → 矩阵 8× 大，SM 高利用率
+# 2. CPU dispatch einsum₂
+#    GPU 执行 (B,T,8,16) × (8,4096,16)
+# 完成</span>
+
+<span class="cm"># 时间线（粗略）：
+# CPU: [py][einsum₁][einsum₂]
+# GPU:  ──────[E₁]──────[E₂]──
+#               ^ 更长，但只有 2 个</span></pre>
+    </div>
+  </div>
+
+  <h3>关键洞察：矩阵越大，GPU 越高效</h3>
+  <p>
+    GPU 并行计算的开销主要来自两部分：<strong>kernel 启动开销</strong>（固定，约 5～20μs/次）和
+    <strong>计算本身</strong>。当矩阵很小时（如 16×4096），计算时间短到和启动开销相当，
+    GPU core 大量空转。向量化把 8 个 (16, 4096) 合并成 (8×16, 4096) 等效的大矩阵，
+    GPU 一次性打满。
+  </p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>对比项</th><th>原始 Loop</th><th>向量化 einsum</th></tr></thead>
+    <tbody>
+      <tr><td>CUDA kernel 调用次数</td><td><strong style="color:var(--red)">16 次</strong>（8 A + 8 B）</td><td><strong style="color:var(--green)">2 次</strong></td></tr>
+      <tr><td>Python 解释器开销</td><td>8 次 for 循环迭代</td><td>0（纯张量操作）</td></tr>
+      <tr><td>单次矩阵尺寸（A 投影）</td><td>(B,T,16) @ (4096,16)^T 每次</td><td>(B,T,8,16) @ (8,16,4096) 合并</td></tr>
+      <tr><td>显存读写次数</td><td>8 对 (read A, write mid, read B, write out)</td><td>1 次读全部 A + 1 次读全部 B</td></tr>
+      <tr><td>实测推理加速（batch=1）</td><td>1.0×（基准）</td><td><strong style="color:var(--green)">1.48～1.61×</strong></td></tr>
+      <tr><td>实测训练加速（ZeRO-3）</td><td>1.0×（基准）</td><td>~1.0×（通信开销主导，LoRA 占比 &lt;1%）</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<!-- ═══ 07 完整 shape 推导 ═══ -->
+<div id="shapes" class="section">
+  <div class="section-header">
+    <span class="section-num">07</span>
+    <h2 class="section-title">完整 Shape 推导 — 7B 模型实际数值</h2>
+  </div>
+
+  <p>以 <strong>q_proj</strong>（最常被 LoRA 修改的层）为例，lora_r=128, expert_num=8, batch=4, seq_len≈500：</p>
+
+  <div class="shape-flow" style="flex-direction:column;align-items:flex-start;gap:.5rem">
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:.2rem">// 输入路径</div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape amber">x<br><small>(4, 500, 4096)</small></div>
+      <div class="arrow">→ _apply_token_mask →</div>
+      <div class="shape amber">lora_x<br><small>(4, 500, 4096)</small></div>
+      <div class="arrow">→ Router →</div>
+      <div class="shape blue">router<br><small>(4, 500, 8)</small></div>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin:.4rem 0 .2rem">// 权重堆叠</div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape purple">8 × (16, 4096)<br><small>loraA[i].weight</small></div>
+      <div class="arrow">→ stack →</div>
+      <div class="shape purple">A<br><small>(8, 16, 4096)</small></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape purple">8 × (4096, 16)<br><small>loraB[i].weight</small></div>
+      <div class="arrow">→ stack →</div>
+      <div class="shape purple">B<br><small>(8, 4096, 16)</small></div>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin:.4rem 0 .2rem">// einsum 计算</div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape amber">lora_x<br><small>(4,500,4096)</small></div>
+      <div class="arrow">einsum 'bti,nri→btnr'</div>
+      <div class="shape purple">A<br><small>(8,16,4096)</small></div>
+      <div class="arrow">→</div>
+      <div class="shape green">out_A<br><small>(4,500,8,16)</small></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape green">out_A<br><small>(4,500,8,16)</small></div>
+      <div class="arrow">einsum 'btnr,nor→btno'</div>
+      <div class="shape purple">B<br><small>(8,4096,16)</small></div>
+      <div class="arrow">→</div>
+      <div class="shape amber">out_B<br><small>(4,500,8,4096)</small></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape amber">out_B<br><small>(4,500,8,4096)</small></div>
+      <div class="arrow">× router (4,500,8,1)</div>
+      <div class="arrow">.sum(dim=2) × scaling</div>
+      <div class="arrow">→</div>
+      <div class="shape green">lora_out<br><small>(4,500,4096)</small></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+      <div class="shape blue">W·x<br><small>(4,500,4096)</small></div>
+      <div class="arrow">+</div>
+      <div class="shape green">lora_out<br><small>(4,500,4096)</small></div>
+      <div class="arrow">→</div>
+      <div class="shape amber">result<br><small>(4,500,4096)</small></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 08 在 eval 中使用 ═══ -->
+<div id="usage" class="section">
+  <div class="section-header">
+    <span class="section-num">08</span>
+    <h2 class="section-title">在正式 Eval 中使用</h2>
+  </div>
+
+  <p>向量化 forward 通过环境变量控制，<strong>默认开启</strong>，无需修改代码。</p>
+
+  <h3>控制方式</h3>
+
+<pre><span class="cm"># 默认：向量化开启（推荐，推理更快）</span>
+CUDA_VISIBLE_DEVICES=6 python -m ETrain.Eval.LLaVA.CoIN.model_vqa_science \
+    --model-path ... --batch-size 4 ...
+
+<span class="cm"># 显式开启</span>
+COIN_USE_VECTORIZED_LORA=1 python ...
+
+<span class="cm"># 回退原始 loop（用于对比测试或排查问题）</span>
+COIN_USE_VECTORIZED_LORA=0 python ...</pre>
+
+  <div class="alert info">
+    <div class="alert-head">前提条件：必须使用 optimize 分支的 coinmoelora.py</div>
+    <p style="font-size:12px;margin-top:.3rem">
+      MoEMoKA 分支（main）无向量化代码，即使设 <code>COIN_USE_VECTORIZED_LORA=1</code> 也无效（变量不存在）。
+      使用前确认：<code>git branch</code> 显示 <code>* optimize</code>，
+      或 <code>git show HEAD:CoIN/peft/tuners/coinmoelora.py | grep vectorized</code> 有输出。
+    </p>
+  </div>
+
+  <h3>完整效果评估（什么时候值得用）</h3>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>场景</th><th>向量化效果</th><th>建议</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>推理 eval（batch=1）</td>
+        <td style="color:var(--green)">+48%～+61%</td>
+        <td style="color:var(--green)">✓ 明确有收益，应开启</td>
+      </tr>
+      <tr>
+        <td>推理 eval（batch=4）</td>
+        <td style="color:var(--green)">预计 +20%～+40%（未单独测量）</td>
+        <td style="color:var(--green)">✓ 推荐开启（与批量推理叠加）</td>
+      </tr>
+      <tr>
+        <td>训练（ZeRO-3 offload）</td>
+        <td style="color:var(--text-dim)">~0%（通信主导）</td>
+        <td>开启无害，只是不显著</td>
+      </tr>
+      <tr>
+        <td>排查 LoRA 数值问题</td>
+        <td style="color:var(--amber)">需关闭对比</td>
+        <td style="color:var(--amber)">⚠ 建议设 =0 用原始 loop 确认结果一致</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="alert ok">
+    <div class="alert-head">已验证：向量化输出与原始 loop 数值等价</div>
+    bench_vectorized_infer.sh 同时用两种实现跑相同 300 样本，答案文件 diff 为 0——
+    数学等价，无精度损失。
+  </div>
+</div>
+
+</main>
+</div>
+
+<footer>
+  <span>CoIN · MoELoRA 向量化技术讲解 · optimize 分支 · 2026-05-29</span>
+  <span>推理加速 1.48～1.61× · 代码位置：CoIN/peft/tuners/coinmoelora.py</span>
+</footer>
+
+<script>
+const navItems = document.querySelectorAll('.nav-item');
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navItems.forEach(n => {
+        n.classList.toggle('active', n.getAttribute('href') === '#' + e.target.id);
+      });
+    }
+  });
+}, { rootMargin: '-15% 0px -75% 0px' });
+document.querySelectorAll('[id]').forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

@@ -9,7 +9,7 @@ F.scaled_dot_product_attention, which:
     on RTX 3090 (SM 8.6) the Flash backend is used for prefill
 
 Usage:
-    from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
+    from ETrain.Train.LLaVA.attn_sdpa_eval import replace_llama_attn_with_sdpa
     replace_llama_attn_with_sdpa()
 
 Environment toggle (default on):

@@ -442,26 +442,50 @@ class LLaVATrainer(Trainer):
 
 
     def save_trained_model(self, training_args):
+        print(f"[save_trained_model] rank={training_args.local_rank} lora_enable={training_args.lora_enable} moe_moka_enable={getattr(training_args,'moe_moka_enable',False)} output_dir={training_args.output_dir}", flush=True)
         if training_args.lora_enable or getattr(training_args, 'moe_moka_enable', False):
+            print(f"[save_trained_model] rank={training_args.local_rank} gathering peft state...", flush=True)
             state_dict = get_peft_state_maybe_zero_3(
                 self.model.named_parameters(), training_args.lora_bias
             )
+            print(f"[save_trained_model] rank={training_args.local_rank} state_dict keys={len(state_dict)}", flush=True)
             non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
                 self.model.named_parameters()
             )
+            print(f"[save_trained_model] rank={training_args.local_rank} non_lora keys={len(non_lora_state_dict)}", flush=True)
             if training_args.local_rank == 0 or training_args.local_rank == -1:
-                self.model.config.save_pretrained(training_args.output_dir)
+                try:
+                    self.model.config.save_pretrained(training_args.output_dir)
+                    print(f"[save_trained_model] saved config.json OK", flush=True)
+                except Exception as e:
+                    print(f"[save_trained_model] config.save_pretrained FAILED: {e}", flush=True)
+                    # Fallback: copy config from base model
+                    import shutil, glob
+                    base_cfg = os.path.join(getattr(training_args,'model_name_or_path',''), 'config.json')
+                    if os.path.exists(base_cfg):
+                        shutil.copy(base_cfg, os.path.join(training_args.output_dir, 'config.json'))
+                        print(f"[save_trained_model] copied config.json from base model", flush=True)
                 if getattr(training_args, 'moe_moka_enable', False):
                     # PeftType.MOE_MOKA_CoIN is not registered in get_peft_model_state_dict;
                     # save state_dict directly (keys include adapter_name) + adapter_config.json.
                     # NOTE: use literal "adapter_model.bin", NOT the module-level WEIGHTS_NAME which
                     # resolves to "pytorch_model.bin" (from transformers.utils, not peft.utils).
-                    torch.save(state_dict, os.path.join(training_args.output_dir, "adapter_model.bin"))
-                    self.model.peft_config['default'].save_pretrained(training_args.output_dir)
+                    adapter_path = os.path.join(training_args.output_dir, "adapter_model.bin")
+                    torch.save(state_dict, adapter_path)
+                    print(f"[save_trained_model] saved adapter_model.bin ({os.path.getsize(adapter_path)/1e6:.1f} MB)", flush=True)
+                    try:
+                        self.model.peft_config['default'].save_pretrained(training_args.output_dir)
+                        print(f"[save_trained_model] saved adapter_config.json OK", flush=True)
+                    except Exception as e:
+                        print(f"[save_trained_model] peft_config.save_pretrained FAILED: {e}", flush=True)
                 else:
                     self.model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-                torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
+                non_lora_path = os.path.join(training_args.output_dir, 'non_lora_trainables.bin')
+                torch.save(non_lora_state_dict, non_lora_path)
+                print(f"[save_trained_model] saved non_lora_trainables.bin ({os.path.getsize(non_lora_path)/1e6:.1f} MB)", flush=True)
+                print(f"[save_trained_model] ALL DONE for {training_args.output_dir}", flush=True)
         else:
+            print(f"[save_trained_model] rank={training_args.local_rank} using safe_save_model_for_hf_trainer", flush=True)
             safe_save_model_for_hf_trainer(trainer=self,
                                         output_dir=training_args.output_dir)
             
