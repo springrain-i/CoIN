@@ -85,21 +85,23 @@
 <h2 id="sec-goal">① 研究目标</h2>
 <div class="card">
 <p><strong>研究问题</strong>：持续指令微调（T1→T8）中，MoELoRA 的文本梯度是否系统性主导参数更新，且这种主导是否随任务序号单调加剧？</p>
-<p><strong>核心指标</strong>：梯度主导比值 <span class="highlight-t">R(k)</span></p>
-<div class="code">R(k)  =  ||G^t_k||_F / ||G^v_k||_F
+<p><strong>核心指标</strong>：梯度主导比值，同时记录三个视角</p>
+<div class="code">R_A(k)     = ||G^t_A||_F  / ||G^v_A||_F       ← W_A 精确分解（all batch）
+R_dW(k)    = ||G^t_dW||_F / ||G^v_dW||_F      ← ΔW=BA 合并权重，更直接
+R_A_tok(k) = (||G^t_A||_F/n_text) / (||G^v_A||_F/n_vis)   ← per-token 归一化，消除 token 数差异
 
 其中：
-  G^t_k  =  第 k 个任务训练中，文本 token 对 W_A 参数梯度的贡献量
-  G^v_k  =  视觉 token 对 W_A 参数梯度的贡献量
-  k = 任务序号（1=ScienceQA … 8=OCRVQA）
+  G^t_A[n,r,d]  = Σ_{b,t∈text}  (∂L/∂out_A)[b,t,n,r]  ×  lora_x[b,t,d]  （精确，全 batch）
+  G^t_dW[d_o,d] = Σ_{b,t∈text}  (∂L/∂lora_out)[b,t,d_o] ×  lora_x[b,t,d]  （精确，gram trick）
+  G^t_B         = ||g_out_B * text_mask||_F                                   （proxy）
+  n_text / n_vis = 当前 batch 中 text / visual token 总数
 
-精确定义（W_A）：
-  G^t_A[n,r,d] = Σ_{t∈text}  (∂L/∂out_A)[t,n,r]  ×  x[t,d]
-  G^v_A[n,r,d] = Σ_{t∈visual} (∂L/∂out_A)[t,n,r]  ×  x[t,d]</div>
+k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
 <table>
   <tr><th>预期现象</th><th>对应指标</th></tr>
-  <tr><td>文本梯度始终主导</td><td>所有任务 R(k) > 1</td></tr>
-  <tr><td>主导随任务序列加剧</td><td>R(k) 随 k 单调递增</td></tr>
+  <tr><td>文本梯度始终主导</td><td>所有任务 R_A(k), R_dW(k) > 1</td></tr>
+  <tr><td>主导随任务序列加剧</td><td>R_A(k) 和 R_dW(k) 随 k 单调递增</td></tr>
+  <tr><td>消除 token 数效应后偏置仍成立</td><td>R_A_tok(k), R_dW_tok(k) > 1</td></tr>
   <tr><td>这是视觉模态知识更易被遗忘的机制性原因</td><td>与 text/visual acc 差距相关</td></tr>
 </table>
 </div>
@@ -282,18 +284,31 @@
 ∂L/∂W_A  =  G_out_A^T  @  x
 形状验证：(r×T) @ (T×d_in) = r×d_in  ✓</div>
 
-<h4>W_B 的推导（完全对称）</h4>
+<h4>W_B 的推导</h4>
 <div class="code">h_B[t, p]  =  Σ_i  W_B[p, i] · h_A[t, i] · scaling
 
 ∂L/∂W_B[p, i]
   =  Σ_t  (∂L/∂h_B[t,p])  ·  h_A[t, i] · scaling
-       ↑
-   G_out_B[t,p]
 
-矩阵形式：∂L/∂W_B  =  G_out_B^T  @  h_A  · scaling
-形状验证：(d_out×T) @ (T×r) = d_out×r  ✓</div>
+矩阵形式：∂L/∂W_B  =  G_out_B^T  @  h_A  · scaling  （精确公式）
 
-<h4>按模态分解（W_A 和 W_B 完全对称）</h4>
+⚠ 代码实现为 proxy：(g_out_B * text_mask).norm()，不含 h_A。
+  原因：存储 h_A=out_A.detach() 额外消耗 N 倍内存（N=8 experts）；W_A 和 ΔW 已足够支持论点。</div>
+
+<h4>ΔW = B@A 合并梯度（新增，精确）</h4>
+<div class="code">ΔW(x) = B @ A @ x = lora_out / scaling    （单 expert 情形；MoE 下为 router 加权和）
+
+∂L/∂(ΔW)[d_out, d_in]
+  =  Σ_t  (∂L/∂lora_out[t, d_out])  ×  lora_x[t, d_in]   ← 直接从 lora_out 节点反传
+  =  g_lora_out^T  @  lora_x                                  (d_out × d_in)
+
+注：不显式构造此矩阵（64MB/层），用 gram matrix trick：
+  ||G^t_dW||_F² = trace(Kg ⊙ Kx)   Kg=(T_t,T_t), Kx=(T_t,T_t)   无大矩阵
+
+物理含义：直接测量"LoRA 有效权重更新方向中 text 贡献占比"。
+  与 W_A 不同：W_A 测输入压缩子空间偏置；ΔW 测最终写入模型的等效权重偏置。</div>
+
+<h4>按模态分解（W_A 和 ΔW 精确，W_B 为 proxy）</h4>
 <div class="code">对 W_A：把 x 拆成 x_text + x_visual
 ∂L/∂W_A  =  G_out_A^T @ x
            =  G_out_A^T @ (x_text + x_visual)
@@ -447,29 +462,47 @@
 <h2 id="sec-code">④ 代码实现</h2>
 
 <div class="card">
-<h3>核心：coinmoelora.py — hook_A / hook_B</h3>
-<p>在 <code>_lora_vectorized()</code> 里，当 <code>_log_gradients=True</code> 时，计算完 <code>out_A</code> 和 <code>out_B</code> 之后注册两个 backward hook：</p>
+<h3>核心：coinmoelora.py — 三个 backward hook</h3>
+<p>触发顺序由计算图决定：<strong>hook_lora_out</strong>（ΔW，最先）→ <strong>hook_B</strong>（W_B proxy）→ <strong>hook_A</strong>（W_A，最后，负责 flush）。<code>x_ref</code> 在 hook_A 释放；hook_lora_out 读时仍有效。</p>
 
 <p class="file-header">CoIN/peft/tuners/coinmoelora.py  → _lora_vectorized()</p>
 <div class="code-file">if getattr(self, '_log_gradients', False):
-    raw_mask   = self.token_mask           # (B,T) int  —  小，2KB
+    raw_mask   = self.token_mask
     logger_ref = getattr(self, '_grad_logger', None)
     layer_name = getattr(self, '_grad_layer_name', '')
     step       = logger_ref.step if logger_ref is not None else 0
     log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
+    A_shape, A_dtype, A_device = A.shape, A.dtype, A.device   # ZeRO-3 safe
 
     out_A = torch.einsum('bti,nri->btnr', lora_x, A)   # (B,T,N,r_per)
     out_B = torch.einsum('btnr,nor->btno', out_A, B)    # (B,T,N,d_out)
+    x_ref = [lora_x.detach()]   # freed in hook_A; hook_lora_out reads first
 
-    # 关键：lora_x 捕获在 mutable list 里，hook 触发后立刻置 None 释放
-    # gradient_checkpointing 下，此闭包在 backward 重计算阶段创建，生命周期短
-    # 峰值内存：~7 modules × 16MB per checkpoint segment ≈ 112MB
-    x_ref = [lora_x.detach()]  # (B, T, d_in)
+    # ── hook_lora_out: ΔW=BA，gram matrix trick ──────────────────────────────
+    # ||G^t_b||_F² = trace(Kg_b ⊙ Kx_b), 无大矩阵, per-sample 累加
+    def hook_lora_out(g_lora_out):   # (B,T,d_out)
+        if logger_ref is None or step % log_every != 0: return
+        x_cap = x_ref[0]
+        with torch.no_grad():
+            g_t_sq = g_v_sq = n_text = n_vis = 0
+            for b in range(raw_mask.shape[0]):
+                t_idx = (raw_mask[b] == 2);  n_t = int(t_idx.sum())
+                v_idx = (raw_mask[b] == 1);  n_v = int(v_idx.sum())
+                n_text += n_t;  n_vis += n_v
+                if n_t > 0:
+                    g_t = g_lora_out[b,t_idx]; x_t = x_cap[b,t_idx]
+                    g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum().item()
+                if n_v > 0:
+                    g_v = g_lora_out[b,v_idx]; x_v = x_cap[b,v_idx]
+                    g_v_sq += (g_v @ g_v.T * (x_v @ x_v.T)).sum().item()
+            logger_ref._pending_dw[(step, layer_name)] = {
+                'g_tdW': g_t_sq**0.5, 'g_vdW': g_v_sq**0.5,
+                'n_text': n_text, 'n_vis': n_vis,
+            }
 
-    # hook_B：W_B 代理指标（proxy），无需 x，直接用 ∂L/∂out_B 的范数
+    # ── hook_B: W_B proxy，full batch broadcast ───────────────────────────────
     def hook_B(g_out_B):
-        if logger_ref is None or step % log_every != 0:
-            return
+        if logger_ref is None or step % log_every != 0: return
         with torch.no_grad():
             tm = (raw_mask == 2).float()[:, :, None, None]
             vm = (raw_mask == 1).float()[:, :, None, None]
@@ -478,41 +511,34 @@
                 'g_vB': (g_out_B * vm).norm().item(),
             }
 
-    # hook_A：W_A 精确指标，用 einsum 计算真实外积和
-    def hook_A(g_out_A):
-        # g_out_A: (B, T, N, r_per)
-        x_cap = x_ref[0]
-        x_ref[0] = None  # 立刻释放，不管是否记录
-
-        if logger_ref is None or step % log_every != 0:
-            return
+    # ── hook_A: W_A 精确，全 batch 累加，最后 flush ────────────────────────────
+    def hook_A(g_out_A):   # (B,T,N,r_per)
+        x_cap = x_ref[0];  x_ref[0] = None
+        if logger_ref is None or step % log_every != 0: return
         with torch.no_grad():
-            mask1d = raw_mask[0] if raw_mask.dim() == 2 else raw_mask
-            t_idx = (mask1d == 2)  # (T,) bool
-            v_idx = (mask1d == 1)
-
-            g_t = g_out_A[0, t_idx, :, :]  # (T_text, N, r_per)
-            g_v = g_out_A[0, v_idx, :, :]  # (T_vis,  N, r_per)
-            x_t = x_cap[0,   t_idx, :]      # (T_text, d_in)
-            x_v = x_cap[0,   v_idx, :]      # (T_vis,  d_in)
-
-            # 精确外积求和：G^t_A[n,r,d] = Σ_t g_t[t,n,r] * x_t[t,d]
-            G_t = torch.einsum('tnr,td->nrd', g_t, x_t)  # (N, r_per, d_in)
-            G_v = torch.einsum('tnr,td->nrd', g_v, x_v)
-
-            entry = logger_ref._pending.pop((step, layer_name), {})
+            G_t = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
+            G_v = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
+            for b in range(raw_mask.shape[0]):
+                t_idx = (raw_mask[b] == 2);  v_idx = (raw_mask[b] == 1)
+                if t_idx.any():
+                    G_t += torch.einsum('tnr,td->nrd', g_out_A[b,t_idx], x_cap[b,t_idx])
+                if v_idx.any():
+                    G_v += torch.einsum('tnr,td->nrd', g_out_A[b,v_idx], x_cap[b,v_idx])
+            eB  = logger_ref._pending.pop((step, layer_name), {})
+            edW = logger_ref._pending_dw.pop((step, layer_name), {})
             logger_ref._flush(
                 step, layer_name,
                 G_t.norm().item(), G_v.norm().item(),
-                entry.get('g_tB', 0.0), entry.get('g_vB', 0.0),
+                eB.get('g_tB',0.), eB.get('g_vB',0.),
+                edW.get('g_tdW',0.), edW.get('g_vdW',0.),
+                edW.get('n_text',0), edW.get('n_vis',0),
             )
 
-    if out_B.requires_grad:
-        out_B.register_hook(hook_B)
-    if out_A.requires_grad:
-        out_A.register_hook(hook_A)
-
-    return (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]</div>
+    lora_out = (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
+    if lora_out.requires_grad: lora_out.register_hook(hook_lora_out)
+    if out_B.requires_grad:    out_B.register_hook(hook_B)
+    if out_A.requires_grad:    out_A.register_hook(hook_A)
+    return lora_out</div>
 </div>
 
 <div class="card">
@@ -550,12 +576,12 @@
         # 写入 step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
         ...</div>
 
-<p>CSV 结构：</p>
-<div class="code">step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
-1,  base_model.model.layers.0.self_attn.q_proj,  0.2871,  0.0000,  inf,  0.1672,  0.0000,  inf
-5,  base_model.model.layers.0.self_attn.q_proj,  0.3142,  0.0156,  20.1, 0.2011,  0.0089,  22.6
+<p>CSV 结构（新版，含三指标 + token 数量）：</p>
+<div class="code">step, layer, G_text_A, G_vis_A, R_A, R_A_tok, G_text_B, G_vis_B, R_B, G_text_dW, G_vis_dW, R_dW, R_dW_tok, n_text, n_vis
+1,  ...q_proj,  0.0000, 0.0000, inf, inf,  0.167, 0.000, inf,  0.000, 0.000, inf, inf,  0, 0
+5,  ...q_proj,  0.3142, 0.0156, 20.1, 19.3,  0.201, 0.009, 22.6,  0.285, 0.012, 23.8, 22.8,  612, 576
 ...</div>
-<div class="note">step=0 时 G_text_A=0 是正常的：W_B 初始化为零，因此 ∂L/∂out_A = W_Bᵀ × ∂L/∂out_B = 0。分析时过滤 step=0 和无视觉 token 的纯文本 batch（g_vis_A &lt; 1e-6）。</div>
+<div class="note">step=0/1 时 G_text_A=0 是正常的：W_B 初始化为零，∂L/∂out_A=W_Bᵀ×∂L/∂out_B=0。分析时过滤 n_vis=0（纯文本 batch）和 g_vis_A &lt; 1e-6。R_A_tok / R_dW_tok 消除 token 数量差异，是与 R_A / R_dW 对比的关键列。</div>
 </div>
 
 <div class="card">
@@ -653,6 +679,21 @@ _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
     <td>每 rank 写独立文件 <code>{task}_rank{N}_grad_stats.csv</code>，分析时 concat</td>
   </tr>
   <tr>
+    <td>hook_A 只取 batch[0]（bug）</td>
+    <td><code>g_out_A[0, t_idx, ...]</code> 丢弃其余 7 个样本，G 范数被低估约 1/√B</td>
+    <td>改为循环 B 个样本累加：<code>for b in range(B): G_t += einsum(...[b],...)</code></td>
+  </tr>
+  <tr>
+    <td>R(k) 混入 token 数量差异</td>
+    <td>T_vis≈576 vs T_text≈31%，不归一化时 R 被 token 比例压低</td>
+    <td>CSV 新增 n_text / n_vis 列；额外输出 R_A_tok = (G_t/n_text)/(G_v/n_vis)</td>
+  </tr>
+  <tr>
+    <td>只有 W_A 和 W_B 两个视角</td>
+    <td>W_A 测压缩子空间偏置，W_B 是 proxy；缺少"最终等效权重"的直接测量</td>
+    <td>新增 hook_lora_out：测 ΔW=BA 合并梯度，用 gram trick 避免 64MB 矩阵</td>
+  </tr>
+  <tr>
     <td>DeepSpeed CPUAdam nvcc 找不到</td>
     <td><code>CUDA_HOME=$CONDA_PREFIX</code> 里没有 nvcc</td>
     <td>改为 <code>CUDA_HOME=/usr/local/cuda-11.8</code>，cu117 缓存命中，无需重编</td>
@@ -730,7 +771,7 @@ _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
   <tr><th>步骤</th><th>内容</th><th>状态</th></tr>
   <tr>
     <td>1</td>
-    <td>用精确指标重跑 T1（<code>run_grad_t1_2gpu.sh 1</code>），验证 R_A 数量级</td>
+    <td>用新三指标版本重跑 T1（<code>run_grad_t1_2gpu.sh 1</code>），获得 R_A / R_dW / R_A_tok 基准值</td>
     <td><span class="tag tag-warn">待跑</span></td>
   </tr>
   <tr>
