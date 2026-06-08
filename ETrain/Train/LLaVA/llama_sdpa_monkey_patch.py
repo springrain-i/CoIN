@@ -16,6 +16,7 @@ Environment toggle (default on):
     COIN_USE_SDPA_PATCH=0   # disable, fall back to original transformers attention
 """
 
+import math
 import os
 import warnings
 from typing import Optional, Tuple
@@ -131,6 +132,33 @@ def forward_sdpa(
         dropout_p=0.0,
         is_causal=is_causal,
     )
+
+    # ── attention logging (only during prefill, not decode) ───────────────────
+    if (
+        not is_decode
+        and getattr(self, '_log_attn', False)
+        and getattr(self, '_attn_token_mask', None) is not None
+    ):
+        logger_ref = getattr(self, '_attn_logger', None)
+        token_mask = self._attn_token_mask
+        step       = logger_ref.step if logger_ref is not None else 0
+        log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
+        if logger_ref is not None and step % log_every == 0:
+            with torch.no_grad():
+                # Recompute attention weights for stats only — no grad, not used
+                # for the actual output (attn_output already computed above via SDPA).
+                scale  = 1.0 / math.sqrt(query_states.shape[-1])
+                logits = torch.matmul(query_states, key_states.transpose(-2, -1)) * scale
+                if attn_mask is not None:
+                    logits = logits + attn_mask
+                elif is_causal:
+                    cm = ~torch.tril(torch.ones(
+                        q_len, kv_seq_len, dtype=torch.bool, device=query_states.device))
+                    logits.masked_fill_(cm[None, None], float("-inf"))
+                w = torch.softmax(logits.float(), dim=-1).to(query_states.dtype)
+                layer_name = getattr(self, '_attn_layer_name', 'unknown')
+                logger_ref._record(step, layer_name, w, token_mask)
+                del w, logits  # free immediately
 
     attn_output = (
         attn_output.transpose(1, 2)

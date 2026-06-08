@@ -99,9 +99,13 @@ python ETrain/Train/LLaVA/train_grad.py \
     --report_to none \
     ${prev_ckpt_arg} \
     --log_gradient_stats True \
-    --grad_task_name "T${TASK}_${task_name}" \
-    --grad_output_dir "${GRAD_OUT_DIR}" \
-    --grad_log_interval 1 \
+    --log_attn_stats      True \
+    --grad_task_name      "T${TASK}_${task_name}" \
+    --grad_output_dir     "${GRAD_OUT_DIR}" \
+    --attn_output_dir     "${COIN_REPO_ROOT}/analysis/attn_dominance" \
+    --grad_log_interval   1 \
     2>&1 | tee "${log_file}"
 
-echo "Task ${TASK} done. CSV: ${GRAD_OUT_DIR}/T${TASK}_${task_name}_grad_stats.csv"
+echo "Task ${TASK} done."
+echo "  Grad CSV: ${GRAD_OUT_DIR}/T${TASK}_${task_name}_rank*_grad_stats.csv"
+echo "  Attn CSV: ${COIN_REPO_ROOT}/analysis/attn_dominance/T${TASK}_${task_name}_rank*_attn_stats.csv"

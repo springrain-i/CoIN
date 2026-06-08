@@ -1,36 +1,34 @@
 """
-train_grad.py — training entry point with ModalGradientLogger injected.
+train_grad.py — training entry with ModalGradientLogger + AttentionLogger injected.
 
-Usage (same as train_mem.py, plus two extra args):
-  python -m ETrain.Train.LLaVA.train_grad \
-      ... (all normal train.py args) ... \
-      --log_gradient_stats True \
-      --grad_task_name ScienceQA \
-      --grad_output_dir analysis/gradient_dominance \
-      --grad_log_every 1
+Usage:
+  python ETrain/Train/LLaVA/train_grad.py \\
+      ... (all normal train.py args) ... \\
+      --log_gradient_stats True \\
+      --log_attn_stats      True \\
+      --grad_task_name      ScienceQA \\
+      --grad_output_dir     analysis/gradient_dominance \\
+      --attn_output_dir     analysis/attn_dominance \\
+      --grad_log_interval   1
 
-How it works:
-  1. Parses --log_gradient_stats / --grad_task_name / --grad_output_dir / --grad_log_every
-     from sys.argv and removes them so train.py never sees them.
-  2. Monkey-patches LLaVATrainer to inject a TrainerCallback that:
-       - on_train_begin: attaches logger to model, enables _log_gradients on each LoRA layer
-       - on_step_end:    calls logger.step_end()
-       - on_train_end:   saves CSV
-  3. Activates the SDPA patch (same as train_mem.py).
-  4. Calls train() normally.
+Both loggers are independent — either or both can be enabled.
+COIN_USE_SDPA_PATCH=1 must be set when --log_attn_stats True (attn weights
+require the SDPA patch's manual recompute path).
 """
 
 import sys
 import os
 
 # ── sys.path: repo-local ETrain takes precedence over editable install ────────
-_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_repo_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-# ── parse & strip gradient-logger specific args before train.py sees them ─────
+
+# ── parse & strip our custom args before train.py sees them ──────────────────
 def _pop_arg(argv, flag, default=None):
-    """Remove --flag value from argv list and return value."""
     try:
         idx = argv.index(flag)
         val = argv[idx + 1]
@@ -39,63 +37,96 @@ def _pop_arg(argv, flag, default=None):
     except (ValueError, IndexError):
         return default
 
-_argv = sys.argv[1:]
-_log_stats     = _pop_arg(_argv, "--log_gradient_stats", "False").lower() == "true"
-_task_name     = _pop_arg(_argv, "--grad_task_name", "task_unknown")
-_grad_out_dir  = _pop_arg(_argv, "--grad_output_dir", "analysis/gradient_dominance")
-_log_every     = int(_pop_arg(_argv, "--grad_log_interval", "1"))
-sys.argv[1:]   = _argv   # train.py will see the cleaned argv
 
-# ── SDPA monkey patch (same as train_mem.py) ──────────────────────────────────
+_argv = sys.argv[1:]
+_log_grad      = _pop_arg(_argv, "--log_gradient_stats", "False").lower() == "true"
+_log_attn      = _pop_arg(_argv, "--log_attn_stats",     "False").lower() == "true"
+_task_name     = _pop_arg(_argv, "--grad_task_name",     "task_unknown")
+_grad_out_dir  = _pop_arg(_argv, "--grad_output_dir",    "analysis/gradient_dominance")
+_attn_out_dir  = _pop_arg(_argv, "--attn_output_dir",    "analysis/attn_dominance")
+_log_every     = int(_pop_arg(_argv, "--grad_log_interval", "1"))
+sys.argv[1:]   = _argv
+
+
+# ── SDPA monkey patch ────────────────────────────────────────────────────────
 _use_sdpa = os.environ.get("COIN_USE_SDPA_PATCH", "0") == "1"
 if _use_sdpa:
     from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
     replace_llama_attn_with_sdpa()
+    if _log_attn:
+        print("[train_grad] SDPA patch active — attention logging enabled")
 else:
     from ETrain.Train.LLaVA.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
     replace_llama_attn_with_flash_attn()
+    if _log_attn:
+        print("[train_grad] WARNING: COIN_USE_SDPA_PATCH not set — "
+              "attention logging requires SDPA patch; attn stats will be empty")
 
-# ── inject callback via monkey-patch ─────────────────────────────────────────
-if _log_stats:
-    from transformers import TrainerCallback, TrainerState, TrainerControl
+
+# ── build loggers (only if enabled) ──────────────────────────────────────────
+_grad_logger = None
+_attn_logger = None
+
+if _log_grad:
     from ETrain.Train.LLaVA.gradient_logger import ModalGradientLogger
-    from ETrain.Train.LLaVA import llava_trainer as _llava_trainer_mod
-
-    _orig_LLaVATrainer_init = _llava_trainer_mod.LLaVATrainer.__init__
-
     _grad_logger = ModalGradientLogger(
         log_every_n_steps=_log_every,
         output_dir=_grad_out_dir,
     )
 
-    class _GradLogCallback(TrainerCallback):
-        def on_train_begin(self, args, state: TrainerState, control: TrainerControl, model=None, **kw):
+if _log_attn:
+    from ETrain.Train.LLaVA.attention_logger import AttentionLogger
+    _attn_logger = AttentionLogger(
+        log_every_n_steps=_log_every,
+        output_dir=_attn_out_dir,
+    )
+
+
+# ── inject single callback that handles both loggers ─────────────────────────
+if _log_grad or _log_attn:
+    from transformers import TrainerCallback, TrainerState, TrainerControl
+    from ETrain.Train.LLaVA import llava_trainer as _llava_trainer_mod
+
+    _orig_init = _llava_trainer_mod.LLaVATrainer.__init__
+
+    class _StatsCallback(TrainerCallback):
+        def on_train_begin(self, args, state: TrainerState, control: TrainerControl,
+                           model=None, **kw):
             if model is None:
                 return
-            # Release fragmented allocator cache from model loading before training starts.
             import torch
             torch.cuda.empty_cache()
-            # attach() sets _log_gradients, _grad_logger, _grad_layer_name on each layer
-            _grad_logger.attach(model)
-            print(f"[GradLogger] gradient logging enabled for task '{_task_name}'")
+            if _grad_logger is not None:
+                _grad_logger.attach(model)
+                print(f"[GradLogger] enabled for task '{_task_name}'")
+            if _attn_logger is not None:
+                _attn_logger.attach(model)
+                print(f"[AttnLogger] enabled for task '{_task_name}'")
 
         def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kw):
-            _grad_logger.step_end()
+            if _grad_logger is not None:
+                _grad_logger.step_end()
+            if _attn_logger is not None:
+                _attn_logger.step_end()
 
         def on_train_end(self, args, state: TrainerState, control: TrainerControl, **kw):
-            path = _grad_logger.save_csv(_task_name)
-            print(f"[GradLogger] training finished — results at {path}")
+            if _grad_logger is not None:
+                path = _grad_logger.save_csv(_task_name)
+                print(f"[GradLogger] saved → {path}")
+            if _attn_logger is not None:
+                path = _attn_logger.save_csv(_task_name)
+                print(f"[AttnLogger] saved → {path}")
 
     def _patched_init(self, *args, **kwargs):
-        # Inject callback into kwargs before calling original __init__
         existing = list(kwargs.get("callbacks") or [])
-        existing.append(_GradLogCallback())
+        existing.append(_StatsCallback())
         kwargs["callbacks"] = existing
-        _orig_LLaVATrainer_init(self, *args, **kwargs)
+        _orig_init(self, *args, **kwargs)
 
     _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init
-    print(f"[GradLogger] monkey-patched LLaVATrainer — task={_task_name}, "
-          f"log_every={_log_every}, out={_grad_out_dir}")
+    print(f"[train_grad] patched LLaVATrainer — task={_task_name}, "
+          f"log_every={_log_every}, grad={_log_grad}, attn={_log_attn}")
+
 
 # ── run training ──────────────────────────────────────────────────────────────
 from ETrain.Train.LLaVA.train import train
