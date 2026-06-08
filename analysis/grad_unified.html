@@ -86,22 +86,23 @@
 <div class="card">
 <p><strong>研究问题</strong>：持续指令微调（T1→T8）中，MoELoRA 的文本梯度是否系统性主导参数更新，且这种主导是否随任务序号单调加剧？</p>
 <p><strong>核心指标</strong>：梯度主导比值，同时记录三个视角</p>
-<div class="code">R_A(k)     = ||G^t_A||_F  / ||G^v_A||_F       ← W_A 精确分解（all batch）
-R_dW(k)    = ||G^t_dW||_F / ||G^v_dW||_F      ← ΔW=BA 合并权重，更直接
-R_A_tok(k) = (||G^t_A||_F/n_text) / (||G^v_A||_F/n_vis)   ← per-token 归一化，消除 token 数差异
+<div class="code">R_A(k)     = ||G^t_A||_F  / ||G^v_A||_F       ← W_A 精确（all batch）
+R_B(k)     = ||G^t_B||_F  / ||G^v_B||_F       ← W_B 精确（all batch）
+R_dW(k)    = ||G^t_dW||_F / ||G^v_dW||_F      ← ΔW=BA 合并，gram trick
+R_X_tok(k) = (||G^t_X||_F/n_text) / (||G^v_X||_F/n_vis)  ← per-token 归一化（X=A,B,dW）
 
-其中：
-  G^t_A[n,r,d]  = Σ_{b,t∈text}  (∂L/∂out_A)[b,t,n,r]  ×  lora_x[b,t,d]  （精确，全 batch）
-  G^t_dW[d_o,d] = Σ_{b,t∈text}  (∂L/∂lora_out)[b,t,d_o] ×  lora_x[b,t,d]  （精确，gram trick）
-  G^t_B         = ||g_out_B * text_mask||_F                                   （proxy）
+其中（全部精确）：
+  G^t_A[n,r,d]  = Σ_{b,t∈text}  g_out_A[b,t,n,r]   × lora_x[b,t,d]
+  G^t_B[n,d,r]  = Σ_{b,t∈text}  g_out_B[b,t,n,d]   × out_A[b,t,n,r]
+  G^t_dW        via gram trick: ||G^t_dW||_F² = Σ_b trace(Kg_b ⊙ Kx_b)
   n_text / n_vis = 当前 batch 中 text / visual token 总数
 
 k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
 <table>
   <tr><th>预期现象</th><th>对应指标</th></tr>
-  <tr><td>文本梯度始终主导</td><td>所有任务 R_A(k), R_dW(k) > 1</td></tr>
-  <tr><td>主导随任务序列加剧</td><td>R_A(k) 和 R_dW(k) 随 k 单调递增</td></tr>
-  <tr><td>消除 token 数效应后偏置仍成立</td><td>R_A_tok(k), R_dW_tok(k) > 1</td></tr>
+  <tr><td>文本梯度始终主导</td><td>所有任务 R_A(k), R_B(k), R_dW(k) > 1</td></tr>
+  <tr><td>主导随任务序列加剧</td><td>R_A(k), R_B(k), R_dW(k) 随 k 单调递增</td></tr>
+  <tr><td>消除 token 数效应后偏置仍成立</td><td>R_A_tok(k), R_B_tok(k), R_dW_tok(k) > 1</td></tr>
   <tr><td>这是视觉模态知识更易被遗忘的机制性原因</td><td>与 text/visual acc 差距相关</td></tr>
 </table>
 </div>
@@ -290,10 +291,14 @@ k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
 ∂L/∂W_B[p, i]
   =  Σ_t  (∂L/∂h_B[t,p])  ·  h_A[t, i] · scaling
 
-矩阵形式：∂L/∂W_B  =  G_out_B^T  @  h_A  · scaling  （精确公式）
+矩阵形式（MoE 版本，B shape=(N,d_out,r_per)）：
+  ∂L/∂B[n,d,r] = Σ_{b,t} g_out_B[b,t,n,d] * out_A[b,t,n,r]
 
-⚠ 代码实现为 proxy：(g_out_B * text_mask).norm()，不含 h_A。
-  原因：存储 h_A=out_A.detach() 额外消耗 N 倍内存（N=8 experts）；W_A 和 ΔW 已足够支持论点。</div>
+按模态分解（精确，已在代码实现）：
+  G^t_B[n,d,r] = Σ_{b,t∈text}   g_out_B[b,t,n,d] * out_A[b,t,n,r]
+  G^v_B[n,d,r] = Σ_{b,t∈visual} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+
+内存：out_A.detach() 形状 (B,T,N,r) = (8,700,8,4) ≈ 0.36MB — 极小，可直接存闭包</div>
 
 <h4>ΔW = B@A 合并梯度（新增，精确）</h4>
 <div class="code">ΔW(x) = B @ A @ x = lora_out / scaling    （单 expert 情形；MoE 下为 router 加权和）
@@ -500,15 +505,26 @@ k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
                 'n_text': n_text, 'n_vis': n_vis,
             }
 
-    # ── hook_B: W_B proxy，full batch broadcast ───────────────────────────────
-    def hook_B(g_out_B):
+    # ── hook_B: exact W_B — out_A_ref freed here ─────────────────────────────
+    # G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+    # shape (N,d_out,r_per) = (8,4096,4) ≈ 0.5MB
+    def hook_B(g_out_B):   # (B,T,N,d_out)
+        out_A_cap = out_A_ref[0];  out_A_ref[0] = None   # release ~0.36MB
         if logger_ref is None or step % log_every != 0: return
         with torch.no_grad():
-            tm = (raw_mask == 2).float()[:, :, None, None]
-            vm = (raw_mask == 1).float()[:, :, None, None]
+            G_t_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
+            G_v_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
+            for b in range(raw_mask.shape[0]):
+                t_idx = (raw_mask[b] == 2);  v_idx = (raw_mask[b] == 1)
+                if t_idx.any():
+                    G_t_B += torch.einsum('tnd,tnr->ndr',
+                                          g_out_B[b,t_idx], out_A_cap[b,t_idx])
+                if v_idx.any():
+                    G_v_B += torch.einsum('tnd,tnr->ndr',
+                                          g_out_B[b,v_idx], out_A_cap[b,v_idx])
             logger_ref._pending[(step, layer_name)] = {
-                'g_tB': (g_out_B * tm).norm().item(),
-                'g_vB': (g_out_B * vm).norm().item(),
+                'g_tB': G_t_B.norm().item(),
+                'g_vB': G_v_B.norm().item(),
             }
 
     # ── hook_A: W_A 精确，全 batch 累加，最后 flush ────────────────────────────
@@ -576,10 +592,14 @@ k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
         # 写入 step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
         ...</div>
 
-<p>CSV 结构（新版，含三指标 + token 数量）：</p>
-<div class="code">step, layer, G_text_A, G_vis_A, R_A, R_A_tok, G_text_B, G_vis_B, R_B, G_text_dW, G_vis_dW, R_dW, R_dW_tok, n_text, n_vis
-1,  ...q_proj,  0.0000, 0.0000, inf, inf,  0.167, 0.000, inf,  0.000, 0.000, inf, inf,  0, 0
-5,  ...q_proj,  0.3142, 0.0156, 20.1, 19.3,  0.201, 0.009, 22.6,  0.285, 0.012, 23.8, 22.8,  612, 576
+<p>CSV 结构（16 列，三指标全精确 + per-token 归一化）：</p>
+<div class="code">step, layer,
+G_text_A, G_vis_A, R_A,  R_A_tok,
+G_text_B, G_vis_B, R_B,  R_B_tok,
+G_text_dW,G_vis_dW,R_dW, R_dW_tok,
+n_text, n_vis
+
+5, ...q_proj,  0.314,0.015, 20.7,19.4,  0.201,0.008,25.1,23.6,  0.285,0.011,25.9,24.3,  612,576
 ...</div>
 <div class="note">step=0/1 时 G_text_A=0 是正常的：W_B 初始化为零，∂L/∂out_A=W_Bᵀ×∂L/∂out_B=0。分析时过滤 n_vis=0（纯文本 batch）和 g_vis_A &lt; 1e-6。R_A_tok / R_dW_tok 消除 token 数量差异，是与 R_A / R_dW 对比的关键列。</div>
 </div>
