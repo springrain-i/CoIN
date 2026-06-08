@@ -299,63 +299,52 @@ $$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F \,/\, n_{\text{text}}}{\|G^v_X\|_F \,/
 <h3>Step 3 · 从 ∂L/∂h 到 ∂L/∂W_A 的完整推导（W_A 和 W_B）</h3>
 
 <h4>W_A 的推导</h4>
-<p>Forward 展开为下标形式（t = 序列位置，i = 输出维度 r，j = 输入维度 d_in）：</p>
-<div class="code">h_A[t, i]  =  Σ_j  W_A[i, j] · x[t, j]     ← forward 的精确定义
+<p>Forward 展开（$t$ = 序列位置，$i$ = 输出维度 $r$，$j$ = 输入维度 $d_{\text{in}}$）：</p>
+$$h_A[t,\,i] \;=\; \sum_j W_A[i,j]\cdot x[t,j]$$
+<p>对 $W_A[i,j]$ 链式法则：</p>
+$$\frac{\partial L}{\partial W_A[i,j]}
+  = \sum_t \underbrace{\frac{\partial L}{\partial h_A[t,i]}}_{g_{\text{out}_A}[t,i]}
+    \cdot \underbrace{\frac{\partial h_A[t,i]}{\partial W_A[i,j]}}_{\displaystyle= x[t,j]}
+  = \sum_t g_{\text{out}_A}[t,\,i]\cdot x[t,\,j]$$
+<p>写成矩阵形式：</p>
+$$\frac{\partial L}{\partial W_A}
+  = g_{\text{out}_A}^\top \cdot x
+  \quad \underbrace{(r\times T)\cdot(T\times d_{\text{in}})}_{= r\times d_{\text{in}}\;\checkmark}$$
 
-对 W_A[i, j] 用链式法则求偏导：
+<h4>W_B 的推导（MoE 版，B shape = $(N,\,d_{\text{out}},\,r)$）</h4>
+<p>Forward：</p>
+$$\text{out}_B[b,t,n,d] = \sum_r B[n,d,r]\cdot\text{out}_A[b,t,n,r]$$
+<p>对 $B[n,d,r]$ 链式法则：</p>
+$$\frac{\partial L}{\partial B[n,d,r]}
+  = \sum_{b,t} \frac{\partial L}{\partial \text{out}_B[b,t,n,d]}\cdot\text{out}_A[b,t,n,r]$$
+<p>按模态分解（精确，全 batch）：</p>
+$$G^t_B[n,d,r] = \sum_{b,\;t\in\text{text}}  g_{\text{out}_B}[b,t,n,d]\cdot\text{out\_A}[b,t,n,r]$$
+$$G^v_B[n,d,r] = \sum_{b,\;t\in\text{vis}}   g_{\text{out}_B}[b,t,n,d]\cdot\text{out\_A}[b,t,n,r]$$
+<div class="note" style="margin:.5rem 0">
+<code>out_A.detach()</code> 形状 $(B,T,N,r)=(8,700,8,4)\approx 0.36\text{MB}$ — 极小，直接存闭包。
+</div>
 
-∂L/∂W_A[i,j]
-  =  Σ_t  (∂L/∂h_A[t,i])  ·  (∂h_A[t,i]/∂W_A[i,j])
-       ↑                         ↑
-   G_out_A[t,i]            从 forward 读出 = x[t, j]
+<h4>ΔW = BA 合并梯度（精确，via Gram Trick）</h4>
+<p>$\Delta W(x)=B\cdot A\cdot x = \text{lora\_out}/\text{scaling}$（MoE 下为 router 加权和）</p>
+$$\frac{\partial L}{\partial(\Delta W)[d_o,\,d]}
+  = \sum_t \frac{\partial L}{\partial\text{lora\_out}[t,\,d_o]}\cdot\text{lora\_x}[t,\,d]
+  = g_{\text{lora\_out}}^\top\cdot\text{lora\_x}
+  \;\in\mathbb{R}^{d_{\text{out}}\times d_{\text{in}}}$$
+<p style="color:var(--dim);font-size:.85rem">不显式构造此矩阵（$64\text{MB/层}$）；用 Gram Trick（见 Step 4b）只存 $(T_t\times T_t)$ 的小矩阵即可。</p>
+<p>物理含义：$\Delta W$ 直接测量"LoRA 等效权重更新方向中 text 贡献占比"，与 $W_A$（输入压缩子空间偏置）互补。</p>
 
-  =  Σ_t  G_out_A[t, i]  ·  x[t, j]
-
-写成矩阵乘法：
-∂L/∂W_A  =  G_out_A^T  @  x
-形状验证：(r×T) @ (T×d_in) = r×d_in  ✓</div>
-
-<h4>W_B 的推导</h4>
-<div class="code">h_B[t, p]  =  Σ_i  W_B[p, i] · h_A[t, i] · scaling
-
-∂L/∂W_B[p, i]
-  =  Σ_t  (∂L/∂h_B[t,p])  ·  h_A[t, i] · scaling
-
-矩阵形式（MoE 版本，B shape=(N,d_out,r_per)）：
-  ∂L/∂B[n,d,r] = Σ_{b,t} g_out_B[b,t,n,d] * out_A[b,t,n,r]
-
-按模态分解（精确，已在代码实现）：
-  G^t_B[n,d,r] = Σ_{b,t∈text}   g_out_B[b,t,n,d] * out_A[b,t,n,r]
-  G^v_B[n,d,r] = Σ_{b,t∈visual} g_out_B[b,t,n,d] * out_A[b,t,n,r]
-
-内存：out_A.detach() 形状 (B,T,N,r) = (8,700,8,4) ≈ 0.36MB — 极小，可直接存闭包</div>
-
-<h4>ΔW = B@A 合并梯度（新增，精确）</h4>
-<div class="code">ΔW(x) = B @ A @ x = lora_out / scaling    （单 expert 情形；MoE 下为 router 加权和）
-
-∂L/∂(ΔW)[d_out, d_in]
-  =  Σ_t  (∂L/∂lora_out[t, d_out])  ×  lora_x[t, d_in]   ← 直接从 lora_out 节点反传
-  =  g_lora_out^T  @  lora_x                                  (d_out × d_in)
-
-注：不显式构造此矩阵（64MB/层），用 gram matrix trick：
-  ||G^t_dW||_F² = trace(Kg ⊙ Kx)   Kg=(T_t,T_t), Kx=(T_t,T_t)   无大矩阵
-
-物理含义：直接测量"LoRA 有效权重更新方向中 text 贡献占比"。
-  与 W_A 不同：W_A 测输入压缩子空间偏置；ΔW 测最终写入模型的等效权重偏置。</div>
-
-<h4>按模态分解（W_A 和 ΔW 精确，W_B 为 proxy）</h4>
-<div class="code">对 W_A：把 x 拆成 x_text + x_visual
-∂L/∂W_A  =  G_out_A^T @ x
-           =  G_out_A^T @ (x_text + x_visual)
-           =  G_out_A^T @ x_text   +   G_out_A^T @ x_visual
-           =       G^t_A           +        G^v_A
-
-对 W_B：把 h_A 拆成 h_A_text + h_A_visual
-∂L/∂W_B  =  G_out_B^T @ h_A
-           =  G_out_B^T @ h_A_text   +   G_out_B^T @ h_A_visual
-           =       G^t_B             +        G^v_B
-
-关键性质：G^t + G^v = 完整梯度（精确等式，无近似，因为 x_text 和 x_visual 在 token 空间不重叠）</div>
+<h4>加法封闭性（三个指标均精确成立）</h4>
+<p>因为 token 空间中 $x_{\text{text}}$ 与 $x_{\text{vis}}$ 位置不重叠，矩阵乘法分配律直接给出精确拆分：</p>
+$$\frac{\partial L}{\partial W_A}
+  = G_{\text{out}_A}^\top(x_{\text{text}}+x_{\text{vis}})
+  = G^t_A + G^v_A$$
+$$\frac{\partial L}{\partial B}
+  = G^t_B + G^v_B, \qquad
+  \frac{\partial L}{\partial(\Delta W)}
+  = G^t_{\Delta W} + G^v_{\Delta W}$$
+<div class="note" style="margin:.5rem 0">
+<strong>关键性质</strong>：$G^t + G^v = $ 完整梯度，精确等式，无近似。三个指标的模态分解均严格成立。
+</div>
 </div>
 
 <div class="card">
