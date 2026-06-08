@@ -75,6 +75,9 @@
   .content{flex:1;padding:2rem;max-width:960px;min-width:0}
   /* MathJax 公式块居中并留边距 */
   .mjx-block,.MathJax_Display{margin:.6rem 0!important;overflow-x:auto}
+  /* 代码高亮行 */
+  .hl{color:#e3b341;font-weight:700;background:rgba(227,179,65,.08);display:inline-block;width:100%}
+  .dim{color:#4a5568}
 </style>
 <script>MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']],tags:'none'},
   options:{skipHtmlTags:['script','noscript','style','textarea','code','div.code','div.code-file']},
@@ -437,90 +440,34 @@ g_tdW = G_t.norm()                 # 精确 ‖G^t_ΔW‖_F</div>
 <p>触发顺序由计算图决定：<strong>hook_lora_out</strong>（ΔW，最先）→ <strong>hook_B</strong>（W_B 精确，需 <code>out_A_ref</code>）→ <strong>hook_A</strong>（W_A，最后，负责 flush）。<code>x_ref</code> 在 hook_A 释放；hook_lora_out 读时仍有效。</p>
 
 <p class="file-header">CoIN/peft/tuners/coinmoelora.py  → _lora_vectorized()</p>
-<div class="code-file">if getattr(self, '_log_gradients', False):
-    raw_mask   = self.token_mask
-    logger_ref = getattr(self, '_grad_logger', None)
-    layer_name = getattr(self, '_grad_layer_name', '')
-    step       = logger_ref.step if logger_ref is not None else 0
-    log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
-    A_shape, A_dtype, A_device = A.shape, A.dtype, A.device   # ZeRO-3 safe
+<div class="code-file"><span class="dim"># forward（logging 路径）</span>
+out_A = torch.einsum('bti,nri->btnr', lora_x, A)    <span class="dim"># (B,T,N,r_per)</span>
+out_B = torch.einsum('btnr,nor->btno', out_A, B)     <span class="dim"># (B,T,N,d_out)</span>
+x_ref = [lora_x.detach()]       <span class="dim"># freed in hook_A</span>
+out_A_ref = [out_A.detach()]     <span class="dim"># freed in hook_B — 0.36MB</span>
 
-    out_A = torch.einsum('bti,nri->btnr', lora_x, A)   # (B,T,N,r_per)
-    out_B = torch.einsum('btnr,nor->btno', out_A, B)    # (B,T,N,d_out)
-    x_ref = [lora_x.detach()]   # freed in hook_A; hook_lora_out reads first
+<span class="dim"># ── hook_lora_out: ΔW  fires FIRST ──────────────────────────────────────</span>
+def hook_lora_out(g_lora_out):   <span class="dim"># (B,T,d_out)</span>
+    <span class="dim"># G shape (d_out,d_in)≈33MB — allocate, loop over batch</span>
+<span class="hl">    G_t += g_lora_out[b, t_idx].T @ x_cap[b, t_idx]   # (d_out,T_t)@(T_t,d_in)</span>
+    logger_ref._pending_dw[(step, layer)] = {G_t.norm(), G_v.norm(), n_text, n_vis}
 
-    # ── hook_lora_out: ΔW=BA，gram matrix trick ──────────────────────────────
-    # G^t_ΔW = Σ_{b,t∈text} g_bt^T x_bt,  shape (d_out, d_in) ≈ 33MB bf16 — 精确
-    def hook_lora_out(g_lora_out):   # (B,T,d_out)
-        if logger_ref is None or step % log_every != 0: return
-        x_cap = x_ref[0]
-        d_out, d_in = B_shape[1], A_shape[2]
-        with torch.no_grad():
-            G_t = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
-            G_v = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
-            n_text, n_vis = 0, 0
-            for b in range(raw_mask.shape[0]):
-                t_idx = (raw_mask[b] == 2);  n_text += int(t_idx.sum())
-                v_idx = (raw_mask[b] == 1);  n_vis  += int(v_idx.sum())
-                if t_idx.any():
-                    G_t += g_lora_out[b, t_idx].T @ x_cap[b, t_idx]
-                if v_idx.any():
-                    G_v += g_lora_out[b, v_idx].T @ x_cap[b, v_idx]
-            logger_ref._pending_dw[(step, layer_name)] = {
-                'g_tdW': G_t.norm().item(), 'g_vdW': G_v.norm().item(),
-                'n_text': n_text, 'n_vis': n_vis,
-            }
+<span class="dim"># ── hook_B: W_B  fires SECOND ────────────────────────────────────────────</span>
+def hook_B(g_out_B):             <span class="dim"># (B,T,N,d_out)</span>
+    out_A_ref[0] = None          <span class="dim"># always release, even if skipping log</span>
+<span class="hl">    G_t_B += einsum('tnd,tnr->ndr', g_out_B[b,t_idx], out_A_cap[b,t_idx])</span>
+    logger_ref._pending[(step, layer)] = {G_t_B.norm(), G_v_B.norm()}
 
-    # ── hook_B: exact W_B — out_A_ref freed here ─────────────────────────────
-    # G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
-    # shape (N,d_out,r_per) = (8,4096,4) ≈ 0.5MB
-    def hook_B(g_out_B):   # (B,T,N,d_out)
-        out_A_cap = out_A_ref[0];  out_A_ref[0] = None   # release ~0.36MB
-        if logger_ref is None or step % log_every != 0: return
-        with torch.no_grad():
-            G_t_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
-            G_v_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
-            for b in range(raw_mask.shape[0]):
-                t_idx = (raw_mask[b] == 2);  v_idx = (raw_mask[b] == 1)
-                if t_idx.any():
-                    G_t_B += torch.einsum('tnd,tnr->ndr',
-                                          g_out_B[b,t_idx], out_A_cap[b,t_idx])
-                if v_idx.any():
-                    G_v_B += torch.einsum('tnd,tnr->ndr',
-                                          g_out_B[b,v_idx], out_A_cap[b,v_idx])
-            logger_ref._pending[(step, layer_name)] = {
-                'g_tB': G_t_B.norm().item(),
-                'g_vB': G_v_B.norm().item(),
-            }
+<span class="dim"># ── hook_A: W_A  fires LAST — flush all ──────────────────────────────────</span>
+def hook_A(g_out_A):             <span class="dim"># (B,T,N,r_per)</span>
+    x_ref[0] = None              <span class="dim"># always release</span>
+<span class="hl">    G_t += einsum('tnr,td->nrd', g_out_A[b,t_idx], x_cap[b,t_idx])</span>
+    logger_ref._flush(step, layer, G_t.norm(), G_v.norm(), *pending_B, *pending_dW)
 
-    # ── hook_A: W_A 精确，全 batch 累加，最后 flush ────────────────────────────
-    def hook_A(g_out_A):   # (B,T,N,r_per)
-        x_cap = x_ref[0];  x_ref[0] = None
-        if logger_ref is None or step % log_every != 0: return
-        with torch.no_grad():
-            G_t = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
-            G_v = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
-            for b in range(raw_mask.shape[0]):
-                t_idx = (raw_mask[b] == 2);  v_idx = (raw_mask[b] == 1)
-                if t_idx.any():
-                    G_t += torch.einsum('tnr,td->nrd', g_out_A[b,t_idx], x_cap[b,t_idx])
-                if v_idx.any():
-                    G_v += torch.einsum('tnr,td->nrd', g_out_A[b,v_idx], x_cap[b,v_idx])
-            eB  = logger_ref._pending.pop((step, layer_name), {})
-            edW = logger_ref._pending_dw.pop((step, layer_name), {})
-            logger_ref._flush(
-                step, layer_name,
-                G_t.norm().item(), G_v.norm().item(),
-                eB.get('g_tB',0.), eB.get('g_vB',0.),
-                edW.get('g_tdW',0.), edW.get('g_vdW',0.),
-                edW.get('n_text',0), edW.get('n_vis',0),
-            )
-
-    lora_out = (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
-    if lora_out.requires_grad: lora_out.register_hook(hook_lora_out)
-    if out_B.requires_grad:    out_B.register_hook(hook_B)
-    if out_A.requires_grad:    out_A.register_hook(hook_A)
-    return lora_out</div>
+<span class="dim"># hook 注册（触发顺序由计算图保证）</span>
+lora_out.register_hook(hook_lora_out)   <span class="dim"># 1st</span>
+out_B.register_hook(hook_B)             <span class="dim"># 2nd</span>
+out_A.register_hook(hook_A)             <span class="dim"># 3rd (last)</span></div>
 </div>
 
 <div class="card">
@@ -529,33 +476,17 @@ g_tdW = G_t.norm()                 # 精确 ‖G^t_ΔW‖_F</div>
 
 <p class="file-header">ETrain/Train/LLaVA/gradient_logger.py</p>
 <div class="code-file">class ModalGradientLogger:
-    """
-    支持：gradient_checkpointing / ZeRO-2 / ZeRO-3 / DDP
-    多 GPU：每个 rank 写 {task}_rank{N}_grad_stats.csv，分析时合并
-    """
+<span class="hl">    def attach(self, model):          # 在每个 LoRA 层上设属性触发 hook 注册</span>
+        for name, m in model.named_modules():
+            if isinstance(m, CoINMOELoraLinear):
+                m._log_gradients = True;  m._grad_logger = self;  m._grad_layer_name = name
 
-    def attach(self, model: nn.Module) -> None:
-        """在每个 CoINMOELoraLinear 上设置三个属性，触发 hook 注册"""
-        for name, module in model.named_modules():
-            if isinstance(module, CoINMOELoraLinear):
-                module._log_gradients   = True
-                module._grad_logger     = self
-                module._grad_layer_name = name
+<span class="hl">    def _flush(self, step, layer, g_tA,g_vA, g_tB,g_vB, g_tdW,g_vdW, n_t,n_v):</span>
+        <span class="dim"># hook_A 最后调用；追加一条 16 列记录</span>
+        self.records.append(_StepRecord(...))
 
-    def step_end(self) -> None:
-        self.step += 1   # 每个 optimizer step 后调用一次
-
-    def _flush(self, step, layer, g_tA, g_vA, g_tB, g_vB) -> None:
-        """hook_A 触发后调用，追加一条记录"""
-        if step % self.log_every_n_steps != 0:
-            return
-        self.records.append(_StepRecord(step, layer, g_tA, g_vA, g_tB, g_vB))
-
-    def save_csv(self, task_name: str) -> str:
-        """训练结束时调用，写 {task}_rank{N}_grad_stats.csv"""
+<span class="hl">    def save_csv(self, task_name):    # 训练结束时写 {task}_rank{N}_grad_stats.csv</span>
         rank = dist.get_rank() if dist.is_initialized() else 0
-        path = f"{self.output_dir}/{task_name}_rank{rank}_grad_stats.csv"
-        # 写入 step, layer, G_text_A, G_vis_A, R_A, G_text_B, G_vis_B, R_B
         ...</div>
 
 <p>CSV 结构（16 列，三指标全精确 + per-token 归一化）：</p>
