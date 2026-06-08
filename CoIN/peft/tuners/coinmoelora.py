@@ -435,32 +435,31 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             x_ref     = [lora_x.detach()]    # (B,T,d_in)  freed in hook_A
             out_A_ref = [out_A.detach()]     # (B,T,N,r)   freed in hook_B — tiny ~0.36MB
 
-            # ── hook_lora_out: exact ΔW via gram matrix trick ─────────────────────
+            # ── hook_lora_out: exact ΔW = Σ_{b,t} g_bt^T x_bt ──────────────────
+            # G^t shape (d_out, d_in) = (4096, 4096) ≈ 33MB bf16 — acceptable on 8×24GB
             def hook_lora_out(g_lora_out):
                 # g_lora_out: (B, T, d_out)
                 if logger_ref is None or step % log_every != 0:
                     return
                 x_cap = x_ref[0]  # still alive; hook_A frees it later
+                d_out, d_in = B_shape[1], A_shape[2]
                 with torch.no_grad():
-                    g_t_sq, g_v_sq = 0.0, 0.0
+                    G_t = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
+                    G_v = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
                     n_text_total, n_vis_total = 0, 0
                     for b in range(raw_mask.shape[0]):
                         t_idx = (raw_mask[b] == 2)
                         v_idx = (raw_mask[b] == 1)
-                        n_t, n_v = int(t_idx.sum()), int(v_idx.sum())
-                        n_text_total += n_t
-                        n_vis_total  += n_v
-                        if n_t > 0:
-                            g_t = g_lora_out[b, t_idx]    # (T_t, d_out)
-                            x_t = x_cap[b, t_idx]          # (T_t, d_in)
-                            g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum().item()
-                        if n_v > 0:
-                            g_v = g_lora_out[b, v_idx]
-                            x_v = x_cap[b, v_idx]
-                            g_v_sq += (g_v @ g_v.T * (x_v @ x_v.T)).sum().item()
+                        n_text_total += int(t_idx.sum())
+                        n_vis_total  += int(v_idx.sum())
+                        if t_idx.any():
+                            # (d_out, T_t) @ (T_t, d_in) → (d_out, d_in)
+                            G_t += g_lora_out[b, t_idx].T @ x_cap[b, t_idx]
+                        if v_idx.any():
+                            G_v += g_lora_out[b, v_idx].T @ x_cap[b, v_idx]
                     logger_ref._pending_dw[(step, layer_name)] = {
-                        'g_tdW':  g_t_sq ** 0.5,
-                        'g_vdW':  g_v_sq ** 0.5,
+                        'g_tdW':  G_t.norm().item(),
+                        'g_vdW':  G_v.norm().item(),
                         'n_text': n_text_total,
                         'n_vis':  n_vis_total,
                     }
