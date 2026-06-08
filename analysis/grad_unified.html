@@ -120,9 +120,9 @@ $$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F \,/\, n_{\text{text}}}{\|G^v_X\|_F \,/
 
 <p style="color:var(--dim);font-size:.85rem;margin-bottom:.3rem">其中（全部精确外积求和，全 batch）：</p>
 <div style="font-size:.87rem;line-height:2">
-&nbsp; $G^t_A\,[n,r,d] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_A}[b,t,n,r] \cdot \text{lora\_x}[b,t,d]$
+&nbsp; $G^t_A\,[n,r,d] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_A}[b,t,n,r] \cdot \text{lora_x}[b,t,d]$
   &ensp;—&ensp; 形状 $(N,\,r,\,d_{\text{in}})$<br>
-&nbsp; $G^t_B\,[n,d,r] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_B}[b,t,n,d] \cdot \text{out\_A}[b,t,n,r]$
+&nbsp; $G^t_B\,[n,d,r] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_B}[b,t,n,d] \cdot \text{out_A}[b,t,n,r]$
   &ensp;—&ensp; 形状 $(N,\,d_{\text{out}},\,r)$<br>
 &nbsp; $\|G^t_{\Delta W}\|_F^2 = \displaystyle\sum_b \bigl(K_{g,b} \odot K_{x,b}\bigr)_{\text{sum}}$，
   $K_{g,b}=g_b g_b^\top$，$K_{x,b}=x_b x_b^\top$ &ensp;（Gram Trick，见 Step 4b）
@@ -318,17 +318,17 @@ $$\text{out}_B[b,t,n,d] = \sum_r B[n,d,r]\cdot\text{out}_A[b,t,n,r]$$
 $$\frac{\partial L}{\partial B[n,d,r]}
   = \sum_{b,t} \frac{\partial L}{\partial \text{out}_B[b,t,n,d]}\cdot\text{out}_A[b,t,n,r]$$
 <p>按模态分解（精确，全 batch）：</p>
-$$G^t_B[n,d,r] = \sum_{b,\;t\in\text{text}}  g_{\text{out}_B}[b,t,n,d]\cdot\text{out\_A}[b,t,n,r]$$
-$$G^v_B[n,d,r] = \sum_{b,\;t\in\text{vis}}   g_{\text{out}_B}[b,t,n,d]\cdot\text{out\_A}[b,t,n,r]$$
+$$G^t_B[n,d,r] = \sum_{b,\;t\in\text{text}}  g_{\text{out}_B}[b,t,n,d]\cdot\text{out_A}[b,t,n,r]$$
+$$G^v_B[n,d,r] = \sum_{b,\;t\in\text{vis}}   g_{\text{out}_B}[b,t,n,d]\cdot\text{out_A}[b,t,n,r]$$
 <div class="note" style="margin:.5rem 0">
 <code>out_A.detach()</code> 形状 $(B,T,N,r)=(8,700,8,4)\approx 0.36\text{MB}$ — 极小，直接存闭包。
 </div>
 
 <h4>ΔW = BA 合并梯度（精确，via Gram Trick）</h4>
-<p>$\Delta W(x)=B\cdot A\cdot x = \text{lora\_out}/\text{scaling}$（MoE 下为 router 加权和）</p>
+<p>$\Delta W(x)=B\cdot A\cdot x = \text{lora_out}/\text{scaling}$（MoE 下为 router 加权和）</p>
 $$\frac{\partial L}{\partial(\Delta W)[d_o,\,d]}
-  = \sum_t \frac{\partial L}{\partial\text{lora\_out}[t,\,d_o]}\cdot\text{lora\_x}[t,\,d]
-  = g_{\text{lora\_out}}^\top\cdot\text{lora\_x}
+  = \sum_t \frac{\partial L}{\partial\text{lora_out}[t,\,d_o]}\cdot\text{lora_x}[t,\,d]
+  = g_{\text{lora_out}}^\top\cdot\text{lora_x}
   \;\in\mathbb{R}^{d_{\text{out}}\times d_{\text{in}}}$$
 <p style="color:var(--dim);font-size:.85rem">不显式构造此矩阵（$64\text{MB/层}$）；用 Gram Trick（见 Step 4b）只存 $(T_t\times T_t)$ 的小矩阵即可。</p>
 <p>物理含义：$\Delta W$ 直接测量"LoRA 等效权重更新方向中 text 贡献占比"，与 $W_A$（输入压缩子空间偏置）互补。</p>
