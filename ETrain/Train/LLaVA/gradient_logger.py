@@ -56,6 +56,12 @@ class _StepRecord:
         return self.g_text_B / max(self.g_vis_B, 1e-8)
 
     @property
+    def R_B_tok(self):
+        if self.n_text == 0 or self.n_vis == 0:
+            return float('inf')
+        return (self.g_text_B / self.n_text) / max(self.g_vis_B / self.n_vis, 1e-12)
+
+    @property
     def R_dW(self):
         return self.g_text_dW / max(self.g_vis_dW, 1e-8)
 
@@ -148,7 +154,7 @@ class ModalGradientLogger:
             w.writerow([
                 "step", "layer",
                 "G_text_A", "G_vis_A", "R_A", "R_A_tok",
-                "G_text_B", "G_vis_B", "R_B",
+                "G_text_B", "G_vis_B", "R_B", "R_B_tok",
                 "G_text_dW", "G_vis_dW", "R_dW", "R_dW_tok",
                 "n_text", "n_vis",
             ])
@@ -158,7 +164,7 @@ class ModalGradientLogger:
                     f"{r.g_text_A:.6f}",  f"{r.g_vis_A:.6f}",
                     f"{r.R_A:.4f}",       f"{r.R_A_tok:.4f}",
                     f"{r.g_text_B:.6f}",  f"{r.g_vis_B:.6f}",
-                    f"{r.R_B:.4f}",
+                    f"{r.R_B:.4f}",       f"{r.R_B_tok:.4f}",
                     f"{r.g_text_dW:.6f}", f"{r.g_vis_dW:.6f}",
                     f"{r.R_dW:.4f}",      f"{r.R_dW_tok:.4f}",
                     r.n_text, r.n_vis,
@@ -189,11 +195,13 @@ class ModalGradientLogger:
     def _print_summary(self, task_name: str) -> None:
         if not self.records:
             return
-        valid_A    = [r.R_A    for r in self.records if r.g_vis_A  > 1e-6]
-        valid_B    = [r.R_B    for r in self.records if r.g_vis_B  > 1e-6]
-        valid_dW   = [r.R_dW   for r in self.records if r.g_vis_dW > 1e-6]
+        valid_A    = [r.R_A     for r in self.records if r.g_vis_A  > 1e-6]
+        valid_B    = [r.R_B     for r in self.records if r.g_vis_B  > 1e-6]
+        valid_dW   = [r.R_dW    for r in self.records if r.g_vis_dW > 1e-6]
         valid_Atk  = [r.R_A_tok   for r in self.records
                       if r.n_vis > 0 and r.g_vis_A  > 1e-6 and r.R_A_tok  < 1e6]
+        valid_Btk  = [r.R_B_tok   for r in self.records
+                      if r.n_vis > 0 and r.g_vis_B  > 1e-6 and r.R_B_tok  < 1e6]
         valid_dWtk = [r.R_dW_tok  for r in self.records
                       if r.n_vis > 0 and r.g_vis_dW > 1e-6 and r.R_dW_tok < 1e6]
 
@@ -209,4 +217,5 @@ class ModalGradientLogger:
         _fmt(valid_B,    "R_B:")
         _fmt(valid_dW,   "R_dW:")
         _fmt(valid_Atk,  "R_A/tok:")
+        _fmt(valid_Btk,  "R_B/tok:")
         _fmt(valid_dWtk, "R_dW/tok:")

@@ -409,35 +409,33 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         B = torch.stack([m.mlp.weight for m in self.lora_B[active].loraB], dim=0)  # (N, d_out, r_per)
 
         if getattr(self, '_log_gradients', False):
-            # Three gradient metrics recorded per logged step:
-            #   W_A  (exact):  G^t_A[n,r,d] = Σ_{b,t∈text} g_out_A[b,t,n,r] * lora_x[b,t,d]
-            #                  Accumulated over all batch elements. Shape: (N, r, d_in).
-            #   W_B  (proxy):  ||g_out_B * text_mask||_F  (full batch, no x needed)
-            #   ΔW   (exact):  G^t_dW = Σ_{b,t∈text} g_lora_out[b,t] ⊗ lora_x[b,t]
-            #                  Norm via gram trick: ||G^t_dW||_F² = Σ_b (Kg_b ⊙ Kx_b).sum()
-            #                  avoids materializing the (d_out × d_in) matrix.
+            # Three gradient metrics recorded per logged step (all EXACT):
+            #   W_A:  G^t_A[n,r,d] = Σ_{b,t∈text} g_out_A[b,t,n,r] * lora_x[b,t,d]
+            #         shape (N,r,d_in) — materialised, tiny
+            #   W_B:  G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+            #         shape (N,d_out,r) — materialised, ~0.5MB, freed in hook_B
+            #   ΔW:   gram trick: ||G^t_dW||_F² = Σ_b trace(Kg_b ⊙ Kx_b)
+            #         avoids (d_out×d_in) matrix, ~0.5% compute overhead
             #
-            # Backward firing order (determined by forward graph):
-            #   hook_lora_out → hook_B → hook_A
-            # x_ref is freed in hook_A only; hook_lora_out reads it first while alive.
+            # Backward order: hook_lora_out → hook_B → hook_A (flushes all)
+            # x_ref freed in hook_A; out_A_ref freed in hook_B.
             raw_mask   = self.token_mask
             logger_ref = getattr(self, '_grad_logger', None)
             layer_name = getattr(self, '_grad_layer_name', '')
             step       = logger_ref.step if logger_ref is not None else 0
             log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
 
-            # Capture A's shape/dtype/device now — safe if ZeRO-3 frees A later.
             A_shape, A_dtype, A_device = A.shape, A.dtype, A.device
+            # B shape for G_B zero tensor: (N, d_out, r_per) — infer from B itself
+            B_shape = B.shape  # (N, d_out, r_per)
 
             out_A = torch.einsum('bti,nri->btnr', lora_x, A)  # (B,T,N,r_per)
             out_B = torch.einsum('btnr,nor->btno', out_A, B)   # (B,T,N,d_out)
 
-            # Mutable list; freed in hook_A (last to fire).
-            x_ref = [lora_x.detach()]  # (B, T, d_in)
+            x_ref     = [lora_x.detach()]    # (B,T,d_in)  freed in hook_A
+            out_A_ref = [out_A.detach()]     # (B,T,N,r)   freed in hook_B — tiny ~0.36MB
 
-            # ── hook_lora_out: exact ΔW metric via gram matrix trick ──────────────
-            # ||G^t_b(ΔW)||_F² = trace(Kg_b ⊙ Kx_b), Kg=(T_t,T_t), Kx=(T_t,T_t).
-            # No large matrix materialised. Per-sample squared norms are summed.
+            # ── hook_lora_out: exact ΔW via gram matrix trick ─────────────────────
             def hook_lora_out(g_lora_out):
                 # g_lora_out: (B, T, d_out)
                 if logger_ref is None or step % log_every != 0:
@@ -455,15 +453,11 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                         if n_t > 0:
                             g_t = g_lora_out[b, t_idx]    # (T_t, d_out)
                             x_t = x_cap[b, t_idx]          # (T_t, d_in)
-                            Kg  = g_t @ g_t.T              # (T_t, T_t)
-                            Kx  = x_t @ x_t.T              # (T_t, T_t)
-                            g_t_sq += (Kg * Kx).sum().item()
+                            g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum().item()
                         if n_v > 0:
                             g_v = g_lora_out[b, v_idx]
                             x_v = x_cap[b, v_idx]
-                            Kg  = g_v @ g_v.T
-                            Kx  = x_v @ x_v.T
-                            g_v_sq += (Kg * Kx).sum().item()
+                            g_v_sq += (g_v @ g_v.T * (x_v @ x_v.T)).sum().item()
                     logger_ref._pending_dw[(step, layer_name)] = {
                         'g_tdW':  g_t_sq ** 0.5,
                         'g_vdW':  g_v_sq ** 0.5,
@@ -471,16 +465,33 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                         'n_vis':  n_vis_total,
                     }
 
-            # ── hook_B: proxy metric for W_B (full batch, no per-sample bug) ──────
+            # ── hook_B: exact W_B metric using out_A ──────────────────────────────
+            # out_B[b,t,n,o] = Σ_r out_A[b,t,n,r] * B[n,o,r]
+            # → ∂L/∂B[n,o,r] = Σ_{b,t} g_out_B[b,t,n,o] * out_A[b,t,n,r]
+            # G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+            # shape (N,d_out,r_per) = (8,4096,4) ≈ 0.5MB — fine to materialise
             def hook_B(g_out_B):
+                # g_out_B: (B,T,N,d_out)
+                out_A_cap    = out_A_ref[0]
+                out_A_ref[0] = None   # release
                 if logger_ref is None or step % log_every != 0:
                     return
                 with torch.no_grad():
-                    tm = (raw_mask == 2).float()[:, :, None, None]
-                    vm = (raw_mask == 1).float()[:, :, None, None]
+                    G_t_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
+                    G_v_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
+                    for b in range(raw_mask.shape[0]):
+                        t_idx = (raw_mask[b] == 2)
+                        v_idx = (raw_mask[b] == 1)
+                        if t_idx.any():
+                            # einsum: (T_t,N,d_out) × (T_t,N,r) → (N,d_out,r)
+                            G_t_B += torch.einsum(
+                                'tnd,tnr->ndr', g_out_B[b, t_idx], out_A_cap[b, t_idx])
+                        if v_idx.any():
+                            G_v_B += torch.einsum(
+                                'tnd,tnr->ndr', g_out_B[b, v_idx], out_A_cap[b, v_idx])
                     logger_ref._pending[(step, layer_name)] = {
-                        'g_tB': (g_out_B * tm).norm().item(),
-                        'g_vB': (g_out_B * vm).norm().item(),
+                        'g_tB': G_t_B.norm().item(),
+                        'g_vB': G_v_B.norm().item(),
                     }
 
             # ── hook_A: exact W_A metric, all batch elements ──────────────────────
