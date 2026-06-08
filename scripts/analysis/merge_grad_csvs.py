@@ -1,19 +1,27 @@
 """
-merge_grad_csvs.py — merge per-rank grad_stats CSVs into one file per task.
+merge_grad_csvs.py — merge per-rank grad_stats and attn_stats CSVs into one file per task.
 
-Merging strategy:
-  At each (step, layer), average G_text and G_vis across ranks FIRST,
-  then recompute R from the averages.  This matches the DDP all-reduce
-  semantics (all-reduce averages actual gradient tensors, not their norms).
+Merging strategy (both grad and attn):
+  At each (step, layer), average metric values across ranks FIRST,
+  then recompute derived ratios from the averages.  Hooks fire before
+  reduce-scatter so each rank holds a local shard; averaging is correct.
 
 Usage:
+  python scripts/analysis/merge_grad_csvs.py \\
+      --grad_dir  analysis/gradient_dominance \\
+      --attn_dir  analysis/attn_dominance \\
+      --output_dir analysis/merged
+
+  # legacy flag (grad only):
   python scripts/analysis/merge_grad_csvs.py \\
       --input_dir analysis/gradient_dominance \\
       --output_dir analysis/gradient_dominance/merged
 
 Output per task:
   {task}_merged_grad_stats.csv   — one row per (step, layer), averaged over ranks
-  {task}_merged_summary.csv      — per-layer + global R summary
+  {task}_merged_grad_summary.csv — per-layer + global R summary
+  {task}_merged_attn_stats.csv   — one row per (step, layer), averaged over ranks
+  {task}_merged_attn_summary.csv — per-layer + global R_att summary
 """
 import argparse
 import csv
@@ -151,27 +159,136 @@ def merge_task(task_name: str, rank_files: list[str], output_dir: str) -> None:
     print(f"  summary→ {summary_path}")
 
 
+def merge_task_attn(task_name: str, rank_files: list[str], output_dir: str) -> None:
+    """Merge per-rank attn_stats CSVs: average A values then recompute R."""
+    agg: dict = defaultdict(lambda: {
+        "A_tt": [], "A_tv": [], "A_vt": [], "A_vv": [],
+        "n_text": [], "n_vis": [],
+    })
+    for path in rank_files:
+        for row in load_csv(path):
+            key = (int(row["step"]), row["layer"])
+            d = agg[key]
+            d["A_tt"].append(float(row["A_tt"]))
+            d["A_tv"].append(float(row["A_tv"]))
+            d["A_vt"].append(float(row["A_vt"]))
+            d["A_vv"].append(float(row["A_vv"]))
+            d["n_text"].append(int(row["n_text"]))
+            d["n_vis"].append(int(row["n_vis"]))
+
+    os.makedirs(output_dir, exist_ok=True)
+    stats_path = os.path.join(output_dir, f"{task_name}_merged_attn_stats.csv")
+
+    layer_data: dict = defaultdict(lambda: {
+        "A_tt": [], "A_tv": [], "A_vt": [], "A_vv": [],
+        "n_text": [], "n_vis": [],
+    })
+
+    with open(stats_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "step", "layer",
+            "A_tt", "A_tv", "A_vt", "A_vv",
+            "R_att_text", "R_att_vis",
+            "n_text", "n_vis", "n_ranks",
+        ])
+        for (step, layer), d in sorted(agg.items()):
+            n_ranks = len(d["A_tt"])
+            A_tt  = statistics.mean(d["A_tt"]); A_tv = statistics.mean(d["A_tv"])
+            A_vt  = statistics.mean(d["A_vt"]); A_vv = statistics.mean(d["A_vv"])
+            nt = int(statistics.mean(d["n_text"])); nv = int(statistics.mean(d["n_vis"]))
+            R_att_text = A_tt / max(A_tt + A_tv, 1e-8)
+            R_att_vis  = A_vt / max(A_vt + A_vv, 1e-8)
+            w.writerow([
+                step, layer,
+                f"{A_tt:.6f}", f"{A_tv:.6f}", f"{A_vt:.6f}", f"{A_vv:.6f}",
+                f"{R_att_text:.4f}", f"{R_att_vis:.4f}",
+                nt, nv, n_ranks,
+            ])
+            ld = layer_data[layer]
+            ld["A_tt"].append(A_tt); ld["A_tv"].append(A_tv)
+            ld["A_vt"].append(A_vt); ld["A_vv"].append(A_vv)
+            ld["n_text"].append(nt); ld["n_vis"].append(nv)
+
+    summary_path = os.path.join(output_dir, f"{task_name}_merged_attn_summary.csv")
+    with open(summary_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["scope", "layer", "mean_A_tt", "mean_A_tv", "mean_A_vt", "mean_A_vv",
+                    "R_att_text", "R_att_vis", "n_steps"])
+        all_tt, all_tv, all_vt, all_vv = [], [], [], []
+        for layer, ld in sorted(layer_data.items()):
+            n = len(ld["A_tt"])
+            A_tt = statistics.mean(ld["A_tt"]); A_tv = statistics.mean(ld["A_tv"])
+            A_vt = statistics.mean(ld["A_vt"]); A_vv = statistics.mean(ld["A_vv"])
+            w.writerow([
+                "layer", layer,
+                f"{A_tt:.6f}", f"{A_tv:.6f}", f"{A_vt:.6f}", f"{A_vv:.6f}",
+                f"{A_tt/max(A_tt+A_tv,1e-8):.4f}", f"{A_vt/max(A_vt+A_vv,1e-8):.4f}",
+                n,
+            ])
+            all_tt.extend(ld["A_tt"]); all_tv.extend(ld["A_tv"])
+            all_vt.extend(ld["A_vt"]); all_vv.extend(ld["A_vv"])
+        g_tt = statistics.mean(all_tt); g_tv = statistics.mean(all_tv)
+        g_vt = statistics.mean(all_vt); g_vv = statistics.mean(all_vv)
+        w.writerow([
+            "global", "ALL",
+            f"{g_tt:.6f}", f"{g_tv:.6f}", f"{g_vt:.6f}", f"{g_vv:.6f}",
+            f"{g_tt/max(g_tt+g_tv,1e-8):.4f}", f"{g_vt/max(g_vt+g_vv,1e-8):.4f}",
+            sum(len(ld["A_tt"]) for ld in layer_data.values()),
+        ])
+
+    print(f"[merge-attn] {task_name}: {len(agg)} (step,layer) pairs from {len(rank_files)} rank(s)")
+    print(f"  stats  → {stats_path}")
+    print(f"  summary→ {summary_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir",  default="analysis/gradient_dominance")
-    parser.add_argument("--output_dir", default="analysis/gradient_dominance/merged")
+    # New flags
+    parser.add_argument("--grad_dir",   default=None,
+                        help="Dir with *_rank*_grad_stats.csv files")
+    parser.add_argument("--attn_dir",   default=None,
+                        help="Dir with *_rank*_attn_stats.csv files")
+    parser.add_argument("--output_dir", default="analysis/merged")
+    # Legacy flag (grad only)
+    parser.add_argument("--input_dir",  default=None,
+                        help="Legacy: same as --grad_dir")
     args = parser.parse_args()
 
-    # Group files by task name: {task}_rank{N}_grad_stats.csv
-    pattern = re.compile(r"^(.+)_rank\d+_grad_stats\.csv$")
-    tasks: dict = defaultdict(list)
-    for fname in sorted(os.listdir(args.input_dir)):
-        m = pattern.match(fname)
-        if m:
-            tasks[m.group(1)].append(os.path.join(args.input_dir, fname))
+    grad_dir = args.grad_dir or args.input_dir or "analysis/gradient_dominance"
+    attn_dir = args.attn_dir
 
-    if not tasks:
-        print(f"No rank CSV files found in {args.input_dir}")
-        return
+    # ── merge grad CSVs ───────────────────────────────────────────────────────
+    grad_pattern = re.compile(r"^(.+)_rank\d+_grad_stats\.csv$")
+    grad_tasks: dict = defaultdict(list)
+    if os.path.isdir(grad_dir):
+        for fname in sorted(os.listdir(grad_dir)):
+            m = grad_pattern.match(fname)
+            if m:
+                grad_tasks[m.group(1)].append(os.path.join(grad_dir, fname))
 
-    for task_name, files in sorted(tasks.items()):
-        print(f"\n── {task_name} ({len(files)} rank file(s)) ──")
-        merge_task(task_name, files, args.output_dir)
+    if grad_tasks:
+        for task_name, files in sorted(grad_tasks.items()):
+            print(f"\n── grad: {task_name} ({len(files)} rank file(s)) ──")
+            merge_task(task_name, files, args.output_dir)
+    else:
+        print(f"No grad rank CSV files found in {grad_dir}")
+
+    # ── merge attn CSVs ───────────────────────────────────────────────────────
+    if attn_dir and os.path.isdir(attn_dir):
+        attn_pattern = re.compile(r"^(.+)_rank\d+_attn_stats\.csv$")
+        attn_tasks: dict = defaultdict(list)
+        for fname in sorted(os.listdir(attn_dir)):
+            m = attn_pattern.match(fname)
+            if m:
+                attn_tasks[m.group(1)].append(os.path.join(attn_dir, fname))
+
+        if attn_tasks:
+            for task_name, files in sorted(attn_tasks.items()):
+                print(f"\n── attn: {task_name} ({len(files)} rank file(s)) ──")
+                merge_task_attn(task_name, files, args.output_dir)
+        else:
+            print(f"No attn rank CSV files found in {attn_dir}")
 
 
 if __name__ == "__main__":

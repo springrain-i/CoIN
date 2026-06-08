@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AttentionLogger 实现汇报 · grad_attn 分支</title>
+<style>
+  :root {
+    --bg:#0d1117;--bg2:#161b22;--bg3:#1f2937;--border:#30363d;
+    --text:#c9d1d9;--dim:#6e7681;--blue:#58a6ff;--orange:#f0883e;
+    --green:#3fb950;--purple:#bc8cff;--yellow:#e3b341;--red:#f85149;
+    --mono:'JetBrains Mono','Fira Code',monospace;
+    --sans:-apple-system,'Segoe UI',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.7}
+  h1{font-size:1.7rem;color:#fff;margin-bottom:.3rem}
+  h2{font-size:1.1rem;color:var(--blue);margin:2rem 0 .6rem;
+     border-bottom:1px solid var(--border);padding-bottom:.3rem}
+  h3{font-size:.95rem;color:var(--yellow);margin:1.2rem 0 .4rem}
+  p{margin-bottom:.7rem}
+  .sub{color:var(--dim);font-size:.85rem;margin-bottom:1.5rem}
+  .layout{display:flex;min-height:100vh}
+  .sidebar{width:172px;min-width:172px;flex-shrink:0;position:sticky;top:0;
+           height:100vh;overflow-y:auto;background:var(--bg2);
+           border-right:1px solid var(--border);padding:1.2rem .7rem}
+  .sidebar-title{font-size:.68rem;color:var(--dim);text-transform:uppercase;
+                 letter-spacing:.07em;margin-bottom:.9rem;padding-bottom:.4rem;
+                 border-bottom:1px solid var(--border)}
+  .sidebar a{display:block;font-size:.8rem;font-family:var(--mono);color:var(--dim);
+             text-decoration:none;padding:.28rem .45rem;border-radius:4px;margin:.08rem 0}
+  .sidebar a:hover{color:var(--blue);background:rgba(88,166,255,.08)}
+  .content{flex:1;padding:2rem;max-width:960px;min-width:0}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:.8rem 0}
+  .code{font-family:var(--mono);font-size:.82rem;background:var(--bg3);
+        border-left:3px solid var(--purple);padding:.7rem 1rem;
+        border-radius:0 5px 5px 0;margin:.7rem 0;white-space:pre;overflow-x:auto}
+  .code-file{font-family:var(--mono);font-size:.8rem;background:#0a0f17;
+             border:1px solid var(--border);border-top:2px solid var(--blue);
+             padding:.8rem 1rem;border-radius:4px;margin:.7rem 0;
+             white-space:pre;overflow-x:auto}
+  .file-header{font-family:var(--mono);font-size:.78rem;color:var(--blue);
+               background:var(--bg3);padding:.25rem .7rem;border-radius:4px 4px 0 0;
+               margin-bottom:0;display:inline-block}
+  .tag{display:inline-block;padding:.15rem .5rem;border-radius:4px;
+       font-size:.75rem;font-family:var(--mono);margin:.1rem}
+  .tag-ok{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+  .tag-warn{background:rgba(240,136,62,.15);color:var(--orange);border:1px solid rgba(240,136,62,.3)}
+  .tag-info{background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)}
+  .tag-new{background:rgba(188,140,255,.15);color:var(--purple);border:1px solid rgba(188,140,255,.3)}
+  table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.6rem 0}
+  th{background:var(--bg3);color:var(--dim);padding:.45rem .7rem;text-align:left;
+     border-bottom:1px solid var(--border)}
+  td{padding:.45rem .7rem;border-bottom:1px solid var(--border)}
+  tr:last-child td{border-bottom:none}
+  .note{background:rgba(63,185,80,.06);border:1px solid rgba(63,185,80,.25);
+        border-radius:6px;padding:.8rem 1rem;margin:.8rem 0}
+  .warn-box{background:rgba(240,136,62,.06);border:1px solid rgba(240,136,62,.25);
+            border-radius:6px;padding:.8rem 1rem;margin:.8rem 0}
+  .hl{color:#e3b341;font-weight:700;background:rgba(227,179,65,.08);display:inline-block;width:100%}
+  .dim{color:#4a5568}
+  .hl-t{color:var(--blue);font-weight:600}
+  .hl-v{color:var(--orange);font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;margin:.7rem 0}
+  .metric-box{background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+              padding:.9rem 1rem;text-align:center}
+  .metric-val{font-size:1.5rem;font-family:var(--mono);color:var(--yellow);font-weight:700}
+  .metric-label{font-size:.78rem;color:var(--dim);margin-top:.2rem}
+  .flow{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.7rem 0}
+  .flow-box{background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+            padding:.3rem .7rem;font-family:var(--mono);font-size:.78rem}
+  .flow-arrow{color:var(--dim);font-size:1rem}
+  .signal-high{color:var(--red)}
+  .signal-low{color:var(--orange)}
+</style>
+<script>MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']]},
+  options:{skipHtmlTags:['script','noscript','style','textarea','code','div.code','div.code-file']},
+  svg:{fontCache:'global'}};</script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-title">目录</div>
+  <a href="#sec-what">① 做了什么</a>
+  <a href="#sec-why">② 为什么这样做</a>
+  <a href="#sec-metrics">③ 指标定义</a>
+  <a href="#sec-arch">④ 架构设计</a>
+  <a href="#sec-files">⑤ 文件改动</a>
+  <a href="#sec-csv">⑥ CSV 格式</a>
+  <a href="#sec-run">⑦ 启动方式</a>
+  <a href="#sec-next">⑧ 下一步</a>
+</nav>
+
+<main class="content">
+<h1>AttentionLogger 实现汇报</h1>
+<p class="sub">grad_attn 分支 · 2026-06-09 · 在同一次训练中同时采集梯度统计与注意力统计</p>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-what">① 做了什么</h2>
+<div class="card">
+<p>在 <code>grad_attn</code> 分支上新增了 Attention 数据采集能力。现在一次训练可同时产出：</p>
+<div class="grid2">
+  <div class="metric-box">
+    <div class="metric-val">grad</div>
+    <div class="metric-label">W_A / W_B / ΔW 梯度主导比值<br>（已有，本次无改动）</div>
+  </div>
+  <div class="metric-box">
+    <div class="metric-val" style="color:var(--purple)">attn</div>
+    <div class="metric-label">跨模态注意力分配<br>A_tt / A_tv / A_vt / A_vv<br><span class="tag tag-new">新增</span></div>
+  </div>
+</div>
+<p>输出路径：</p>
+<div class="code">analysis/gradient_dominance/T1_ScienceQA_rank0_grad_stats.csv   ← 不变
+analysis/gradient_dominance/T1_ScienceQA_rank0_grad_summary.csv ← 不变
+analysis/attn_dominance/T1_ScienceQA_rank0_attn_stats.csv       ← 新增
+analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-why">② 为什么需要 Attention 视角</h2>
+<div class="card">
+<h3>梯度视角的局限</h3>
+<p>梯度统计（R_A, R_B, R_dW）回答的是：<em>参数更新时文本 token 贡献更大还是视觉 token 贡献更大？</em></p>
+<p>但它无法回答：<em>在推理时，模型实际上是否在「看」视觉内容？</em></p>
+
+<h3>Attention 视角补充的内容</h3>
+<table>
+  <tr><th>指标</th><th>过文本化时的预期表现</th></tr>
+  <tr>
+    <td>$A_{tv}$（文本 query → 视觉 key）</td>
+    <td class="signal-low">偏低：文本 token 不关注视觉内容</td>
+  </tr>
+  <tr>
+    <td>$A_{tt}$（文本 query → 文本 key）</td>
+    <td class="signal-high">偏高：文本 token 形成自闭回路</td>
+  </tr>
+  <tr>
+    <td>$A_{vt}$（视觉 query → 文本 key）</td>
+    <td class="signal-high">偏高：视觉 token 被文本强烈吸引</td>
+  </tr>
+  <tr>
+    <td>$A_{vv}$（视觉 query → 视觉 key）</td>
+    <td class="signal-low">偏低：视觉自注意力被削弱</td>
+  </tr>
+</table>
+<div class="note"><strong>核心信号</strong>：$R_\text{att-text} = A_{tt} / (A_{tt} + A_{tv})$ 随任务序号递增，说明持续学习让 text token 越来越忽视 visual 内容。</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-metrics">③ 指标定义</h2>
+<div class="card">
+<h3>四个注意力预算占比</h3>
+<p>对每个 (head, query)，先对目标模态的全部 key <strong>求和</strong>，得到该 query 分配给此模态的"预算占比"，再对所有 (batch, head, query position) 取均值：</p>
+$$A_{tt} = \mathbb{E}_{b,h,q\in\text{text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
+$$A_{tv} = \mathbb{E}_{b,h,q\in\text{text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
+$$A_{vt} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
+$$A_{vv} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
+<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
+<div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$ &emsp; $A_{vt}+A_{vv} \approx 1$</div>
+<p>两行各自加和为 1，由 softmax 归一化性质直接保证，无需额外归一化步骤。</p>
+
+<h3>两个派生比值</h3>
+<table>
+  <tr><th>列名</th><th>公式</th><th>含义</th></tr>
+  <tr>
+    <td><code>R_att_text</code></td>
+    <td>$A_{tt} / (A_{tt} + A_{tv})$</td>
+    <td>文本 query 注意力预算中分配给文本 key 的比例（$\approx A_{tt}$，因分母 $\approx 1$）</td>
+  </tr>
+  <tr>
+    <td><code>R_att_vis</code></td>
+    <td>$A_{vt} / (A_{vt} + A_{vv})$</td>
+    <td>视觉 query 注意力预算中分配给文本 key 的比例（高 = 视觉被拉向文本）</td>
+  </tr>
+</table>
+<div class="note">归一化后 <code>R_att_text ≈ A_tt</code>，直接读 A_tt 列即可判断过文本化程度。与梯度指标 R_A / R_dW 的区别：梯度指标反映参数<strong>更新</strong>的偏向，注意力指标反映前向传播中信息<strong>流动</strong>的偏向。两者可能不同步，联合分析更完整。</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-arch">④ 架构设计</h2>
+<div class="card">
+<h3>训练路径不变</h3>
+<p>Attention logging 不修改 <code>attn_output</code> 的计算：</p>
+<div class="flow">
+  <div class="flow-box">Q, K, V 计算</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box" style="border-color:var(--green)">F.scaled_dot_product_attention</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">o_proj → output</div>
+</div>
+<p>logging 路径在 <code>torch.no_grad()</code> 里单独执行，不进入计算图：</p>
+<div class="flow">
+  <div class="flow-box">同一 Q, K</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box" style="border-color:var(--purple)">manual softmax (no_grad)</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">attn stats 提取</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box" style="border-color:var(--red)">del weights</div>
+</div>
+<div class="note">峰值额外显存：[B=1, H=32, T=2048, T=2048] fp32 ≈ 512 MB，计算完立刻释放。每层顺序执行，不累积。</div>
+
+<h3>Token mask 如何传入 LlamaAttention</h3>
+<p>原有的 <code>_apply_lora_token_mask()</code> 只传给 LoRA 层。<code>AttentionLogger.attach()</code> 对该方法做 monkey-patch，在同一次调用中同时传给所有 <code>LlamaAttention</code> 模块：</p>
+<p class="file-header">attention_logger.py → attach()</p>
+<div class="code-file">orig_apply = model._apply_lora_token_mask.__func__
+
+def _patched_apply(self_model):
+    orig_apply(self_model)          <span class="dim"># LoRA 层照常传</span>
+<span class="hl">    token_mask = getattr(self_model, "current_lora_mask", None)</span>
+<span class="hl">    for module in self_model.model.modules():</span>
+<span class="hl">        if isinstance(module, LlamaAttention):</span>
+<span class="hl">            module._attn_token_mask = token_mask   # 新增传播</span>
+
+model._apply_lora_token_mask = types.MethodType(_patched_apply, model)</div>
+<div class="note">不修改 <code>llava_llama.py</code>，MoEMoKA 分支完全不受影响。</div>
+
+<h3>两个 Logger 共用一个 Callback</h3>
+<p>一次训练里 grad logger 和 attn logger 共享同一个 <code>_StatsCallback</code>，<code>on_step_end</code> 同时递增两个计数器，<code>on_train_end</code> 同时写两份 CSV。</p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-files">⑤ 文件改动总览</h2>
+<div class="card">
+<table>
+  <tr><th>文件</th><th>操作</th><th>说明</th></tr>
+  <tr>
+    <td><code>ETrain/Train/LLaVA/attention_logger.py</code></td>
+    <td><span class="tag tag-new">新增</span></td>
+    <td>AttentionLogger 主类；attach / _record / save_csv / summary</td>
+  </tr>
+  <tr>
+    <td><code>ETrain/Train/LLaVA/llama_sdpa_monkey_patch.py</code></td>
+    <td><span class="tag tag-warn">修改</span></td>
+    <td>在 SDPA 调用后插入 no_grad 统计路径；默认关闭，不影响速度</td>
+  </tr>
+  <tr>
+    <td><code>ETrain/Train/LLaVA/train_grad.py</code></td>
+    <td><span class="tag tag-warn">修改</span></td>
+    <td>支持 --log_attn_stats；两个 logger 共用一个 callback</td>
+  </tr>
+  <tr>
+    <td><code>scripts/LLaVA/Train_MOE/run_grad_t1_single.sh</code></td>
+    <td><span class="tag tag-warn">修改</span></td>
+    <td>加入 --log_attn_stats True 和 --attn_output_dir 参数</td>
+  </tr>
+  <tr>
+    <td><code>ETrain/Models/LLaVA/language_model/llava_llama.py</code></td>
+    <td><span class="tag tag-ok">不改</span></td>
+    <td>token mask 传播通过 monkey-patch 扩展，原文件零改动</td>
+  </tr>
+  <tr>
+    <td><code>CoIN/peft/tuners/coinmoelora.py</code></td>
+    <td><span class="tag tag-ok">不改</span></td>
+    <td>梯度 hook 无修改</td>
+  </tr>
+</table>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-csv">⑥ CSV 格式</h2>
+<div class="card">
+<h3>attn_stats.csv（每条记录 = 一个 micro-batch × 一层）</h3>
+<div class="code">step, layer, A_tt, A_tv, A_vt, A_vv, R_att_text, R_att_vis, n_text, n_vis
+
+0, model.layers.0.self_attn,  0.874, 0.126, 0.243, 0.757,  0.874, 0.243,  612, 576
+0, model.layers.1.self_attn,  0.861, 0.139, 0.251, 0.749,  0.861, 0.251,  612, 576
+...
+# 注：A_tt+A_tv ≈ 1，A_vt+A_vv ≈ 1（归一化保证）；R_att_text ≈ A_tt</div>
+
+<h3>attn_summary.csv（每行 = 一层的跨所有 step 的均值 + 全局行）</h3>
+<div class="code">scope,  layer,               mean_A_tt, mean_A_tv, mean_A_vt, mean_A_vv, R_att_text, R_att_vis, n_steps
+layer,  model.layers.0...,  0.874,     0.126,     0.243,     0.757,     0.874,      0.243,     100
+...
+global, ALL,                0.869,     0.131,     0.238,     0.762,     0.869,      0.238,     3200</div>
+
+<h3>与 grad_stats.csv 对齐方式</h3>
+<p>两份 CSV 的 <code>step</code> 和 <code>layer</code> 列语义相同，可直接 join：</p>
+<div class="code">import pandas as pd
+df_grad = pd.read_csv("T1_..._rank0_grad_stats.csv")
+df_attn = pd.read_csv("T1_..._rank0_attn_stats.csv")
+df = df_grad.merge(df_attn, on=["step", "layer"])  # 联合分析</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-run">⑦ 启动方式</h2>
+<div class="card">
+<h3>必须条件</h3>
+<table>
+  <tr><th>条件</th><th>原因</th></tr>
+  <tr><td><code>COIN_USE_SDPA_PATCH=1</code></td><td>attn logging 路径在 SDPA patch 里，Flash attn 无法插入</td></tr>
+  <tr><td>分支 <code>grad_attn</code></td><td>attention_logger.py 只在此分支存在</td></tr>
+</table>
+
+<h3>启动命令</h3>
+<div class="code">cd /data4/home/sqx/CoIN/.worktrees/grad
+
+conda activate coin
+export CUDA_HOME=/data4/home/sqx/.conda/envs/coin
+export COIN_USE_SDPA_PATCH=1
+export CC=/usr/bin/gcc-11; export CXX=/usr/bin/g++-11; export CUDAHOSTCXX=/usr/bin/g++-11
+export https_proxy=http://127.0.0.1:7890
+
+bash scripts/LLaVA/Train_MOE/run_grad_t1_single.sh 1</div>
+
+<h3>手动控制各开关</h3>
+<div class="code">python ETrain/Train/LLaVA/train_grad.py \
+    ... (正常训练参数) ... \
+    --log_gradient_stats True  \   # 梯度统计开关
+    --log_attn_stats      True  \   # 注意力统计开关（独立）
+    --grad_task_name      T1_ScienceQA \
+    --grad_output_dir     analysis/gradient_dominance \
+    --attn_output_dir     analysis/attn_dominance \
+    --grad_log_interval   1</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-next">⑧ 下一步</h2>
+<div class="card">
+<table>
+  <tr><th>#</th><th>任务</th><th>状态</th></tr>
+  <tr>
+    <td>1</td>
+    <td>跑 T1 ScienceQA，验证两份 CSV 同时生成且数值合理（A_tt + A_tv + A_vt + A_vv ≈ 1）</td>
+    <td><span class="tag tag-warn">待跑</span></td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>跑 T1–T8，观察 R_att_text(k) 是否随 k 递增（过文本化加剧的 attn 侧证据）</td>
+    <td><span class="tag tag-warn">待跑</span></td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>联合分析：R_dW(k) vs R_att_text(k)，看梯度偏向与注意力偏向是否同步</td>
+    <td><span class="tag tag-warn">待分析</span></td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>commit 本次新增文件并 push 到 grad_attn 远端（commit 2aa6961）</td>
+    <td><span class="tag tag-new">已完成</span></td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td>（可选）对 MoEMoKA 重复同样分析，验证模态分离 A 矩阵是否同时降低 R_dW 和 R_att_text</td>
+    <td><span class="tag tag-info">待讨论</span></td>
+  </tr>
+</table>
+
+<div class="note" style="border-color:var(--green);background:rgba(114,211,142,.06)">
+  <strong>已解决</strong>：<code>_record()</code> 对 key 维度先 <code>.sum(-1)</code> 再 <code>.mean()</code>，而非直接 <code>.mean()</code>。数值测试（交错 text/visual 序列）确认 <code>A_tt+A_tv = 1.000000</code>，<code>A_vt+A_vv = 1.000000</code>（commit 2aa6961）。
+</div>
+</div>
+
+<p style="color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center">
+  CoIN · grad_attn 分支 · AttentionLogger · 2026-06-09
+</p>
+</main>
+</div>
+</body>
+</html>
