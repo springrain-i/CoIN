@@ -144,8 +144,7 @@ $$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F \,/\, n_{\text{text}}}{\|G^v_X\|_F \,/
   <tr><th>文件</th><th>位置</th><th>作用</th></tr>
   <tr><td><code>gradient_logger.py</code></td><td>ETrain/Train/LLaVA/</td><td>ModalGradientLogger：attach 到模型，记录每步 G^t/G^v，写 CSV</td></tr>
   <tr><td><code>train_grad.py</code></td><td>ETrain/Train/LLaVA/</td><td>训练入口：monkey-patch LLaVATrainer 注入 GradLogCallback</td></tr>
-  <tr><td><code>run_grad_t1_single.sh</code></td><td>scripts/LLaVA/Train_MOE/</td><td>单卡（GPU 6）启动，无 DeepSpeed，T1 梯度分析入口</td></tr>
-  <tr><td><code>run_grad_t1_2gpu.sh</code></td><td>scripts/LLaVA/Train_MOE/</td><td>双卡（GPU 6,7）ZeRO-3 启动，CUDA_HOME=cuda-11.8</td></tr>
+  <tr><td><code>run_grad_8gpu.sh</code></td><td>scripts/LLaVA/Train_MOE/</td><td>8 卡 ZeRO-3 启动，正式梯度分析入口</td></tr>
 </table>
 <h3>修改文件</h3>
 <table>
@@ -430,30 +429,6 @@ g_tdW = G_t.norm()                 # 精确 ‖G^t_ΔW‖_F</div>
 <p>此外，per-token 归一化（$R_{\text{tok}}$）会进一步消除文本/视觉 token 数量差异对 R 的影响，只保留纯粹的模态梯度强度比。待 T1 重跑确认具体数值。</p>
 </div>
 
-<div class="card">
-<h3>Step 6 · MoELoRA 专家结构：每个专家独立 (A_i, B_i)</h3>
-<p>MoELoRA 有 N=8 个专家，每个专家持有<strong>独立的 (A_i, B_i) 对</strong>，没有共享 B。</p>
-<svg viewBox="0 0 820 130" width="100%">
-  <!-- A_i panel -->
-  <rect x="10" y="10" width="370" height="110" rx="6" fill="rgba(188,140,255,.05)" stroke="#bc8cff" stroke-width="1.2"/>
-  <text x="195" y="34" fill="#bc8cff" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">A_i（每个专家独立）shape (r, d_in)</text>
-  <text x="26"  y="58" fill="#c9d1d9" font-size="13" font-family="monospace">G^t_A_i = einsum('tnr,td→nrd', g_t_i, x_t)</text>
-  <text x="26"  y="78" fill="#6e7681" font-size="12" font-family="monospace">只受本专家路径的梯度影响</text>
-  <text x="26"  y="98" fill="#6e7681" font-size="12" font-family="monospace">g_out_A_i 通过本专家 B_i 反传而来</text>
-  <text x="26"  y="116" fill="#bc8cff" font-size="12" font-family="monospace">精确实现：hook_A 捕获 out_A 的梯度</text>
-  <!-- B_i panel -->
-  <rect x="440" y="10" width="370" height="110" rx="6" fill="rgba(227,179,65,.07)" stroke="#e3b341" stroke-width="1.2"/>
-  <text x="625" y="34" fill="#e3b341" font-size="14" text-anchor="middle" font-family="monospace" font-weight="bold">B_i（每个专家独立）shape (d_out, r)</text>
-  <text x="456" y="58" fill="#c9d1d9" font-size="13" font-family="monospace">G^t_B_i = einsum('tnd,tnr→ndr', g_t, out_A_i)</text>
-  <text x="456" y="78" fill="#6e7681" font-size="12" font-family="monospace">需要 out_A_i 作为 backward 输入</text>
-  <text x="456" y="98" fill="#6e7681" font-size="12" font-family="monospace">out_A_ref 存全部专家：shape (B,T,N,r)</text>
-  <text x="456" y="116" fill="#e3b341" font-size="12" font-family="monospace">精确实现：hook_B 消费 out_A_ref</text>
-</svg>
-<div class="note">
-<strong>与 MoEMoKA 的对比：</strong> MoELoRA 的 B_i 也是独立的——R_B 衡量的是每个专家 B_i 的模态偏置，而非共享 B 汇聚 N 条路径的效应。MoEMoKA 才有共享 B（所有专家共用一个上投影矩阵）。
-</div>
-</div>
-
 <!-- ══════════════════════════════════════════════════════ -->
 <h2 id="sec-code">④ 代码实现</h2>
 
@@ -624,34 +599,8 @@ _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
 </div>
 
 <div class="card">
-<h3>启动方式对比</h3>
-<table>
-  <tr><th>脚本</th><th>GPU</th><th>DeepSpeed</th><th>速度</th><th>状态</th></tr>
-  <tr>
-    <td><code>run_grad_t1_single.sh</code></td>
-    <td>GPU 6 · 单卡</td>
-    <td>无</td>
-    <td>~5h / task</td>
-    <td><span class="tag tag-ok">T1 已完成</span></td>
-  </tr>
-  <tr>
-    <td><code>run_grad_t1_2gpu.sh</code></td>
-    <td>GPU 6,7 · 双卡</td>
-    <td>ZeRO-3 + CPU offload</td>
-    <td>~2-3h / task</td>
-    <td><span class="tag tag-ok">smoke test ✓</span></td>
-  </tr>
-  <tr>
-    <td>（未来）8 卡 DDP ZeRO-2</td>
-    <td>8× 3090</td>
-    <td>ZeRO-2（无 offload）</td>
-    <td>~0.7h / task</td>
-    <td><span class="tag tag-warn">规划中</span></td>
-  </tr>
-</table>
-<div class="note">
-双卡 ZeRO-3 的 CUDA_HOME 必须设为 <code>/usr/local/cuda-11.8</code>（系统有 nvcc）。PyTorch 使用 cu117，与 11.8 API 兼容，DeepSpeed 会打印一条 warning 但正常运行。
-</div>
+<h3>启动方式</h3>
+<p>8 卡 ZeRO-3，<code>run_grad_8gpu.sh</code>。启动前设置 <code>CUDA_HOME=/usr/local/cuda-11.8</code>（系统 nvcc 路径），DeepSpeed 会打印一条 cu 版本 warning 但正常运行。</p>
 </div>
 
 <!-- ══════════════════════════════════════════════════════ -->
@@ -719,7 +668,7 @@ _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
   <tr><th>步骤</th><th>内容</th><th>状态</th></tr>
   <tr>
     <td>1</td>
-    <td>用新三指标版本重跑 T1（<code>run_grad_t1_2gpu.sh 1</code>），获得 R_A / R_dW / R_A_tok 基准值</td>
+    <td>用新三指标版本重跑 T1（<code>run_grad_8gpu.sh 1</code>），获得 R_A / R_B / R_dW / *_tok 基准值</td>
     <td><span class="tag tag-warn">待跑</span></td>
   </tr>
   <tr>
