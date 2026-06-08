@@ -19,7 +19,8 @@ export CUDA_VISIBLE_DEVICES=6,7
 export COIN_DS_INCLUDE="localhost:0,1"   # DeepSpeed sees GPU 0,1 (mapped to physical 6,7)
 
 # ── DeepSpeed CPUAdam env ─────────────────────────────────────────────────────
-export CUDA_HOME=${CUDA_HOME:-$CONDA_PREFIX}
+export CUDA_HOME=${CUDA_HOME:-/data4/home/sqx/.conda/envs/coin}
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 export CUDAHOSTCXX=/usr/bin/g++-11
@@ -101,9 +102,9 @@ run_task() {
         --bf16 True \
         --output_dir "${output_dir}" \
         --num_train_epochs 1 \
-        --per_device_train_batch_size 8 \
-        --per_device_eval_batch_size 16 \
-        --gradient_accumulation_steps 8 \
+        --per_device_train_batch_size 1 \
+        --per_device_eval_batch_size 2 \
+        --gradient_accumulation_steps 64 \
         --evaluation_strategy "no" \
         --save_strategy "epoch" \
         --learning_rate 2e-4 \
@@ -112,7 +113,7 @@ run_task() {
         --lr_scheduler_type "cosine" \
         --logging_steps 1 \
         --tf32 True \
-        --model_max_length 2048 \
+        --model_max_length 1024 \
         --gradient_checkpointing True \
         --dataloader_num_workers 4 \
         --lazy_preprocess True \

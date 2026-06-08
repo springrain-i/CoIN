@@ -1,16 +1,17 @@
 """
 ModalGradientLogger — records per-modality gradient contributions to MoELoRA parameters.
 
-Three metrics per layer per logged step:
-  W_A  (exact):  G^t_A = Σ_{b,t∈text} g_out_A[b,t] ⊗ lora_x[b,t]  (all batch elements)
-  W_B  (proxy):  ||g_out_B * text_mask||_F
-  ΔW   (exact):  ||G^t_dW||_F via gram matrix trick (no d_out×d_in materialisation)
+Three metrics per layer per logged step (all EXACT):
+  W_A:  G^t_A[n,r,d] = Σ_{b,t∈text} g_out_A[b,t,n,r] * lora_x[b,t,d]
+  W_B:  G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+  ΔW:   G^t_dW[o,i]  = Σ_{b,t∈text} g_lora_out[b,t,o] * lora_x[b,t,i]   shape (d_out,d_in)
 
-R(k) variants:
+R variants (text/visual ratio; >1 = text dominant):
   R_A      = ||G^t_A||_F  / ||G^v_A||_F
   R_B      = ||G^t_B||_F  / ||G^v_B||_F
   R_dW     = ||G^t_dW||_F / ||G^v_dW||_F
   R_A_tok  = (||G^t_A||_F  / n_text) / (||G^v_A||_F  / n_vis)   per-token normalised
+  R_B_tok  = (||G^t_B||_F  / n_text) / (||G^v_B||_F  / n_vis)
   R_dW_tok = (||G^t_dW||_F / n_text) / (||G^v_dW||_F / n_vis)
 """
 import csv
@@ -169,9 +170,105 @@ class ModalGradientLogger:
                     f"{r.R_dW:.4f}",      f"{r.R_dW_tok:.4f}",
                     r.n_text, r.n_vis,
                 ])
+        self._save_summary_csv(task_name, rank)
         self._print_summary(task_name)
         print(f"[GradLogger] rank{rank} saved {len(self.records)} records → {path}")
         return path
+
+    def _save_summary_csv(self, task_name: str, rank: int) -> None:
+        """Write per-layer and global summary CSV alongside the main stats file.
+
+        Summary rows are computed from raw G values (not R), so the ratio is
+        derived from mean(G_text)/mean(G_vis) — consistent with multi-rank merging.
+        """
+        if not self.records:
+            return
+
+        # Collect per-layer raw G values
+        from collections import defaultdict
+        layer_data: dict = defaultdict(lambda: {
+            'G_text_A': [], 'G_vis_A': [],
+            'G_text_B': [], 'G_vis_B': [],
+            'G_text_dW': [], 'G_vis_dW': [],
+            'n_text': [], 'n_vis': [],
+        })
+        for r in self.records:
+            d = layer_data[r.layer]
+            d['G_text_A'].append(r.g_text_A);  d['G_vis_A'].append(r.g_vis_A)
+            d['G_text_B'].append(r.g_text_B);  d['G_vis_B'].append(r.g_vis_B)
+            d['G_text_dW'].append(r.g_text_dW); d['G_vis_dW'].append(r.g_vis_dW)
+            d['n_text'].append(r.n_text);       d['n_vis'].append(r.n_vis)
+
+        def _ratio(t_vals, v_vals):
+            mt = statistics.mean(t_vals)
+            mv = statistics.mean(v_vals)
+            return mt / max(mv, 1e-8)
+
+        def _ratio_tok(t_vals, v_vals, nt_vals, nv_vals):
+            pairs = [(t/max(nt,1), v/max(nv,1))
+                     for t, v, nt, nv in zip(t_vals, v_vals, nt_vals, nv_vals)
+                     if nt > 0 and nv > 0 and v > 1e-8]
+            if not pairs:
+                return float('inf')
+            return statistics.mean(t/max(v,1e-12) for t,v in pairs)
+
+        summary_path = os.path.join(
+            self.output_dir, f"{task_name}_rank{rank}_summary.csv")
+        with open(summary_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "scope", "layer",
+                "mean_G_text_A", "mean_G_vis_A", "R_A", "R_A_tok",
+                "mean_G_text_B", "mean_G_vis_B", "R_B", "R_B_tok",
+                "mean_G_text_dW", "mean_G_vis_dW", "R_dW", "R_dW_tok",
+                "n_steps",
+            ])
+            # Per-layer rows
+            all_Gt_A, all_Gv_A = [], []
+            all_Gt_B, all_Gv_B = [], []
+            all_Gt_dW, all_Gv_dW = [], []
+            all_nt, all_nv = [], []
+            for layer, d in sorted(layer_data.items()):
+                n = len(d['G_text_A'])
+                mt_A  = statistics.mean(d['G_text_A']);  mv_A  = statistics.mean(d['G_vis_A'])
+                mt_B  = statistics.mean(d['G_text_B']);  mv_B  = statistics.mean(d['G_vis_B'])
+                mt_dW = statistics.mean(d['G_text_dW']); mv_dW = statistics.mean(d['G_vis_dW'])
+                R_A    = mt_A  / max(mv_A,  1e-8)
+                R_B    = mt_B  / max(mv_B,  1e-8)
+                R_dW   = mt_dW / max(mv_dW, 1e-8)
+                R_Atk  = _ratio_tok(d['G_text_A'],  d['G_vis_A'],  d['n_text'], d['n_vis'])
+                R_Btk  = _ratio_tok(d['G_text_B'],  d['G_vis_B'],  d['n_text'], d['n_vis'])
+                R_dWtk = _ratio_tok(d['G_text_dW'], d['G_vis_dW'], d['n_text'], d['n_vis'])
+                w.writerow([
+                    "layer", layer,
+                    f"{mt_A:.6f}", f"{mv_A:.6f}", f"{R_A:.4f}", f"{R_Atk:.4f}",
+                    f"{mt_B:.6f}", f"{mv_B:.6f}", f"{R_B:.4f}", f"{R_Btk:.4f}",
+                    f"{mt_dW:.6f}", f"{mv_dW:.6f}", f"{R_dW:.4f}", f"{R_dWtk:.4f}",
+                    n,
+                ])
+                all_Gt_A.extend(d['G_text_A']);  all_Gv_A.extend(d['G_vis_A'])
+                all_Gt_B.extend(d['G_text_B']);  all_Gv_B.extend(d['G_vis_B'])
+                all_Gt_dW.extend(d['G_text_dW']); all_Gv_dW.extend(d['G_vis_dW'])
+                all_nt.extend(d['n_text']);       all_nv.extend(d['n_vis'])
+
+            # Global summary row
+            gmt_A  = statistics.mean(all_Gt_A);  gmv_A  = statistics.mean(all_Gv_A)
+            gmt_B  = statistics.mean(all_Gt_B);  gmv_B  = statistics.mean(all_Gv_B)
+            gmt_dW = statistics.mean(all_Gt_dW); gmv_dW = statistics.mean(all_Gv_dW)
+            gR_A    = gmt_A  / max(gmv_A,  1e-8)
+            gR_B    = gmt_B  / max(gmv_B,  1e-8)
+            gR_dW   = gmt_dW / max(gmv_dW, 1e-8)
+            gR_Atk  = _ratio_tok(all_Gt_A,  all_Gv_A,  all_nt, all_nv)
+            gR_Btk  = _ratio_tok(all_Gt_B,  all_Gv_B,  all_nt, all_nv)
+            gR_dWtk = _ratio_tok(all_Gt_dW, all_Gv_dW, all_nt, all_nv)
+            w.writerow([
+                "global", "ALL",
+                f"{gmt_A:.6f}", f"{gmv_A:.6f}", f"{gR_A:.4f}", f"{gR_Atk:.4f}",
+                f"{gmt_B:.6f}", f"{gmv_B:.6f}", f"{gR_B:.4f}", f"{gR_Btk:.4f}",
+                f"{gmt_dW:.6f}", f"{gmv_dW:.6f}", f"{gR_dW:.4f}", f"{gR_dWtk:.4f}",
+                len(self.records),
+            ])
+        print(f"[GradLogger] rank{rank} summary → {summary_path}")
 
     def clear_records(self) -> None:
         self.records.clear()

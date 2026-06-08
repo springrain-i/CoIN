@@ -24,7 +24,7 @@ import sys
 import os
 
 # ── sys.path: repo-local ETrain takes precedence over editable install ────────
-_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
@@ -43,7 +43,7 @@ _argv = sys.argv[1:]
 _log_stats     = _pop_arg(_argv, "--log_gradient_stats", "False").lower() == "true"
 _task_name     = _pop_arg(_argv, "--grad_task_name", "task_unknown")
 _grad_out_dir  = _pop_arg(_argv, "--grad_output_dir", "analysis/gradient_dominance")
-_log_every     = int(_pop_arg(_argv, "--grad_log_every", "1"))
+_log_every     = int(_pop_arg(_argv, "--grad_log_interval", "1"))
 sys.argv[1:]   = _argv   # train.py will see the cleaned argv
 
 # ── SDPA monkey patch (same as train_mem.py) ──────────────────────────────────
@@ -72,15 +72,11 @@ if _log_stats:
         def on_train_begin(self, args, state: TrainerState, control: TrainerControl, model=None, **kw):
             if model is None:
                 return
+            # Release fragmented allocator cache from model loading before training starts.
+            import torch
+            torch.cuda.empty_cache()
+            # attach() sets _log_gradients, _grad_logger, _grad_layer_name on each layer
             _grad_logger.attach(model)
-            # Enable logging path in every CoINMOELoraLinear
-            try:
-                from CoIN.peft.tuners.coinmoelora import CoINMOELoraLinear
-                for m in model.modules():
-                    if isinstance(m, CoINMOELoraLinear):
-                        m._log_gradients = True
-            except ImportError:
-                pass
             print(f"[GradLogger] gradient logging enabled for task '{_task_name}'")
 
         def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kw):
