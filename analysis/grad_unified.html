@@ -59,20 +59,37 @@
   .toc a{color:var(--blue);text-decoration:none}
   .toc a:hover{text-decoration:underline}
   .toc li{margin:.2rem 0}
-  nav{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.2rem}
-  nav a{font-size:.75rem;font-family:var(--mono);color:var(--dim);
-        border:1px solid var(--border);border-radius:4px;padding:.1rem .5rem;
-        text-decoration:none}
-  nav a:hover{color:var(--blue);border-color:var(--blue)}
+  /* ── 侧边栏布局 ── */
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.7}
+  .layout{display:flex;min-height:100vh}
+  .sidebar{width:172px;min-width:172px;flex-shrink:0;position:sticky;top:0;
+           height:100vh;overflow-y:auto;background:var(--bg2);
+           border-right:1px solid var(--border);padding:1.2rem .7rem}
+  .sidebar-title{font-size:.68rem;color:var(--dim);text-transform:uppercase;
+                 letter-spacing:.07em;margin-bottom:.9rem;padding-bottom:.4rem;
+                 border-bottom:1px solid var(--border)}
+  .sidebar a{display:block;font-size:.8rem;font-family:var(--mono);color:var(--dim);
+             text-decoration:none;padding:.28rem .45rem;border-radius:4px;
+             margin:.08rem 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sidebar a:hover,.sidebar a.active{color:var(--blue);background:rgba(88,166,255,.08)}
+  .content{flex:1;padding:2rem;max-width:960px;min-width:0}
+  /* MathJax 公式块居中并留边距 */
+  .mjx-block,.MathJax_Display{margin:.6rem 0!important;overflow-x:auto}
 </style>
+<script>MathJax={tex:{inlineMath:[['$','$']],displayMath:[['$$','$$']],tags:'none'},
+  options:{skipHtmlTags:['script','noscript','style','textarea','code','div.code','div.code-file']},
+  svg:{fontCache:'global'}};</script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 </head>
 <body>
 
-<h1>MoELoRA 梯度主导分析 · 完整技术文档</h1>
-<p class="sub">CoIN / grad 分支 · 2026-06-04 · 覆盖：研究目标 · 数学原理 · 代码实现 · 实验结果</p>
+<div class="layout">
 
-<nav>
-  <a href="#sec-goal">① 目标</a>
+<!-- ══ 左侧导航 ══ -->
+<nav class="sidebar">
+  <div class="sidebar-title">目录</div>
+  <a href="#sec-goal">① 研究目标</a>
   <a href="#sec-files">② 文件结构</a>
   <a href="#sec-math">③ 梯度原理</a>
   <a href="#sec-code">④ 代码实现</a>
@@ -81,23 +98,34 @@
   <a href="#sec-next">⑦ 下一步</a>
 </nav>
 
+<!-- ══ 主内容 ══ -->
+<main class="content">
+<h1>MoELoRA 梯度主导分析 · 完整技术文档</h1>
+<p class="sub">CoIN / grad 分支 · 2026-06-08 · 覆盖：研究目标 · 数学原理 · 代码实现 · 实验结果</p>
+
 <!-- ══════════════════════════════════════════════════════ -->
 <h2 id="sec-goal">① 研究目标</h2>
 <div class="card">
 <p><strong>研究问题</strong>：持续指令微调（T1→T8）中，MoELoRA 的文本梯度是否系统性主导参数更新，且这种主导是否随任务序号单调加剧？</p>
-<p><strong>核心指标</strong>：梯度主导比值，同时记录三个视角</p>
-<div class="code">R_A(k)     = ||G^t_A||_F  / ||G^v_A||_F       ← W_A 精确（all batch）
-R_B(k)     = ||G^t_B||_F  / ||G^v_B||_F       ← W_B 精确（all batch）
-R_dW(k)    = ||G^t_dW||_F / ||G^v_dW||_F      ← ΔW=BA 合并，gram trick
-R_X_tok(k) = (||G^t_X||_F/n_text) / (||G^v_X||_F/n_vis)  ← per-token 归一化（X=A,B,dW）
-
-其中（全部精确）：
-  G^t_A[n,r,d]  = Σ_{b,t∈text}  g_out_A[b,t,n,r]   × lora_x[b,t,d]
-  G^t_B[n,d,r]  = Σ_{b,t∈text}  g_out_B[b,t,n,d]   × out_A[b,t,n,r]
-  G^t_dW        via gram trick: ||G^t_dW||_F² = Σ_b trace(Kg_b ⊙ Kx_b)
-  n_text / n_vis = 当前 batch 中 text / visual token 总数
-
-k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
+<p><strong>核心指标</strong>：梯度主导比值，三个视角同时记录（全部精确）</p>
+<p style="margin:.4rem 0">
+$$R_A(k) = \frac{\|G^t_A\|_F}{\|G^v_A\|_F}, \quad
+  R_B(k) = \frac{\|G^t_B\|_F}{\|G^v_B\|_F}, \quad
+  R_{\Delta W}(k) = \frac{\|G^t_{\Delta W}\|_F}{\|G^v_{\Delta W}\|_F}$$
+$$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F / n_{\text{text}}}{\|G^v_X\|_F / n_{\text{vis}}}, \quad X \in \{A,\,B,\,\Delta W\}$$
+</p>
+<p style="color:var(--dim);font-size:.85rem">其中（全部精确外积求和，全 batch）：</p>
+<p style="margin:.3rem 0;font-size:.85rem">
+$G^t_A[n,r,d] = \sum_{b,\,t\in\text{text}} (\partial L/\partial\text{out}_A)[b,t,n,r]\;\cdot\;\text{lora\_x}[b,t,d]$
+&nbsp;·&nbsp; 形状 $(N,r,d_{\text{in}})$
+</p>
+<p style="margin:.3rem 0;font-size:.85rem">
+$G^t_B[n,d,r] = \sum_{b,\,t\in\text{text}} (\partial L/\partial\text{out}_B)[b,t,n,d]\;\cdot\;\text{out\_A}[b,t,n,r]$
+&nbsp;·&nbsp; 形状 $(N,d_{\text{out}},r)$
+</p>
+<p style="margin:.3rem 0;font-size:.85rem">
+$\|G^t_{\Delta W}\|_F^2 = \sum_b (K_{g,b} \odot K_{x,b})_{\text{sum}}$，其中 $K_{g,b}=g_b g_b^\top$，$K_{x,b}=x_b x_b^\top$（Gram Trick，见 Step 4b）
+</p>
 <table>
   <tr><th>预期现象</th><th>对应指标</th></tr>
   <tr><td>文本梯度始终主导</td><td>所有任务 R_A(k), R_B(k), R_dW(k) > 1</td></tr>
@@ -375,6 +403,47 @@ k = 任务序号（1=ScienceQA … 8=OCRVQA）</div>
   <text x="440" y="122" fill="#3fb950" font-size="12" font-family="monospace">内存：x_ref 闭包（~112MB 峰值）</text>
   <text x="440" y="142" fill="#3fb950" font-size="12" font-family="monospace">R 结果待 T1 重跑确认</text>
 </svg>
+</div>
+
+<div class="card">
+<h3>Step 4b · Gram Matrix Trick — ΔW 梯度范数的高效计算</h3>
+<p>
+ΔW 的文本梯度矩阵定义为：
+$$G^t_{\Delta W} \;=\; \sum_{b,\,t \in \text{text}} \mathbf{g}_{bt}^\top \mathbf{x}_{bt}
+\;=\; g_{\text{text}}^\top \, x_{\text{text}}
+\;\in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$$
+直接构造此矩阵代价为 $4096\times4096\times4\text{B}=64\text{MB/层}$，完全不可接受。
+Gram Matrix Trick 用两个小矩阵绕开它。
+</p>
+<h4>推导</h4>
+<p>展开 Frobenius 范数定义：</p>
+$$\|G^t_{\Delta W}\|_F^2
+= \sum_{d,\,i} G^t_{\Delta W}[d,i]^2
+= \sum_{d,\,i} \Bigl(\sum_t g_t[d]\,x_t[i]\Bigr)^2$$
+<p>展开平方，引入双指标 $t_1, t_2$：</p>
+$$= \sum_{d,\,i}\; \sum_{t_1,t_2} g_{t_1}[d]\,x_{t_1}[i]\;g_{t_2}[d]\,x_{t_2}[i]$$
+<p>交换求和次序，把 $d,i$ 移到内层：</p>
+$$= \sum_{t_1,t_2}
+\underbrace{\Bigl(\sum_d g_{t_1}[d]\,g_{t_2}[d]\Bigr)}_{K_g[t_1,t_2]}
+\;\cdot\;
+\underbrace{\Bigl(\sum_i x_{t_1}[i]\,x_{t_2}[i]\Bigr)}_{K_x[t_1,t_2]}
+= \bigl(K_g \odot K_x\bigr)_{\text{sum}}$$
+<p>其中：</p>
+<ul style="margin:.5rem 0 .5rem 1.4rem;color:var(--text);font-size:.88rem">
+  <li>$K_g = g_{\text{text}}\,g_{\text{text}}^\top \in \mathbb{R}^{T_t\times T_t}$ — 梯度向量的 Gram 矩阵</li>
+  <li>$K_x = x_{\text{text}}\,x_{\text{text}}^\top \in \mathbb{R}^{T_t\times T_t}$ — 激活向量的 Gram 矩阵</li>
+  <li>$\odot$ 为逐元素乘法</li>
+</ul>
+<h4>直觉</h4>
+<p>$K_g[t_1,t_2]$ 衡量 token $t_1$ 与 $t_2$ <strong>梯度方向的相似度</strong>；$K_x[t_1,t_2]$ 衡量它们<strong>输入激活的相似度</strong>。两者相乘：梯度方向一致且激活相似的 token 对，对 $\|G^t_{\Delta W}\|_F^2$ 贡献最大。</p>
+<h4>代价对比</h4>
+<table>
+  <tr><th>方法</th><th>内存</th><th>FLOPs（T_t=600）</th></tr>
+  <tr><td>直接构造 $G$</td><td>64MB/层</td><td>$T_t \times d_{\text{out}} \times d_{\text{in}} \approx 10^{10}$</td></tr>
+  <tr><td>Gram Trick</td><td>$2 \times T_t^2 \times 4\text{B} \approx 3\text{MB/层}$</td><td>$2 \times T_t^2 \times d \approx 3\times10^9$（少 3×）</td></tr>
+</table>
+<div class="note">代码：<code>g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum().item()</code>
+per-sample 累加后取平方根即为 $\|G^t_{\Delta W}\|_F$。</div>
 </div>
 
 <div class="card">
@@ -906,8 +975,10 @@ ctx.fillStyle='#6e7681';ctx.font='10px monospace';ctx.fillText('median R_A',pad.
 </script>
 
 <p style="color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center">
-  CoIN · grad 分支 · ModalGradientLogger · 2026-06-04<br>
+  CoIN · grad 分支 · ModalGradientLogger · 2026-06-08<br>
   两个旧文件：<code>grad_analysis_review.html</code>（实验回顾）· <code>gradient_decomp_explainer.html</code>（基础教学）已合并到本文件
 </p>
+</main><!-- /.content -->
+</div><!-- /.layout -->
 </body>
 </html>
