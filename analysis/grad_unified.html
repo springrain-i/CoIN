@@ -440,8 +440,15 @@ $$= \sum_{t_1,t_2}
   <tr><td>直接构造 $G$</td><td>64MB/层</td><td>$T_t \times d_{\text{out}} \times d_{\text{in}} \approx 10^{10}$</td></tr>
   <tr><td>Gram Trick</td><td>$2 \times T_t^2 \times 4\text{B} \approx 3\text{MB/层}$</td><td>$2 \times T_t^2 \times d \approx 3\times10^9$（少 3×）</td></tr>
 </table>
-<div class="note">代码：<code>g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum().item()</code>
-per-sample 累加后取平方根即为 $\|G^t_{\Delta W}\|_F$。</div>
+<div class="warn-box">
+<strong>精确度说明：当前实现是近似，非精确。</strong><br>
+代码对每个 batch 样本单独做 Gram，再把范数平方累加：
+<code style="display:block;margin:.4rem 0">g_t_sq += (g_t @ g_t.T * (x_t @ x_t.T)).sum()  # per sample b</code>
+实际计算的是 $\displaystyle\sum_b \|G^t_b\|_F^2$，而精确值应为 $\left\|\displaystyle\sum_b G^t_b\right\|_F^2$。两者之差是跨 batch 交叉项：
+$$\left\|\sum_b G^t_b\right\|_F^2 = \sum_b \|G^t_b\|_F^2 + 2\sum_{b < b'}\langle G^t_b,\; G^t_{b'}\rangle_F$$
+<strong>为何不做精确版？</strong> 精确做法是把所有 batch 文本 token 拼成 $T_{\text{total}}=B\times T_t\approx 4800$ 再做 Gram，但 Gram 矩阵大小 $4800^2\times 4\text{B}\approx88\text{MB}$，超出了直接构造 $G$（64MB）的收益。<br>
+<strong>对 $R_{\Delta W}$ 的影响：</strong>分子（文本）和分母（视觉）受到对称的近似误差，独立 mini-batch 样本间交叉项期望较小，比值估计仍有参考价值——但与 $W_A$/$W_B$ 的精确范数不能直接比较绝对量级。
+</div>
 </div>
 
 <div class="card">
