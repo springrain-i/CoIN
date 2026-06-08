@@ -410,7 +410,11 @@ $$G^t_{\Delta W} \;=\; \sum_{b,\,t \in \text{text}} \mathbf{g}_{bt}^\top \mathbf
 Gram Matrix Trick 用两个小矩阵绕开它。
 </p>
 <h4>推导</h4>
-<p>以下省略 batch 维 $b$，记 $g_t = \mathbf{g}_{bt}$，$x_t = \mathbf{x}_{bt}$，$t$ 仅遍历文本 token。展开 Frobenius 范数定义：</p>
+<p>$G^t_{\Delta W}$ 上标 $t$ 即"文本模态贡献"的定义——完整梯度按模态精确拆分（加法封闭，与 $W_A/W_B$ 相同）：</p>
+$$\frac{\partial L}{\partial(\Delta W)}
+= \underbrace{\sum_{b,\,t\in\text{text}} \mathbf{g}_{bt}^\top\mathbf{x}_{bt}}_{G^t_{\Delta W}}
++ \underbrace{\sum_{b,\,t\in\text{vis}}  \mathbf{g}_{bt}^\top\mathbf{x}_{bt}}_{G^v_{\Delta W}}$$
+<p>下面只对 $\|G^t_{\Delta W}\|_F^2$ 展开推导；$\|G^v_{\Delta W}\|_F^2$ 完全对称，代码里两者都计算，最后取比值 $R_{\Delta W}=\|G^t\|_F/\|G^v\|_F$。以下省略 batch 维 $b$，记 $g_t=\mathbf{g}_{bt}$，$x_t=\mathbf{x}_{bt}$，$t$ 在此节仅指文本位置。展开 Frobenius 范数定义：</p>
 $$\|G^t_{\Delta W}\|_F^2
 = \sum_{d,\,i} G^t_{\Delta W}[d,i]^2
 = \sum_{d,\,i} \Bigl(\sum_t g_t[d]\,x_t[i]\Bigr)^2$$
