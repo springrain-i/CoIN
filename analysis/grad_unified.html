@@ -397,11 +397,20 @@ $$\frac{\partial L}{\partial B}
 $$G^t_{\Delta W} \;=\; \sum_{b,\,t \in \text{text}} \mathbf{g}_{bt}^\top \mathbf{x}_{bt}
 \;=\; g_{\text{text}}^\top \, x_{\text{text}}
 \;\in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$$
+</p>
+<p style="font-size:.87rem;color:var(--dim);margin-bottom:.6rem">
+符号含义（此节新引入）：
+<ul style="margin:.2rem 0 .5rem 1.4rem;color:var(--dim);font-size:.87rem;line-height:1.9">
+  <li>$\mathbf{g}_{bt} = \dfrac{\partial L}{\partial \text{lora\_out}[b,t]} \in \mathbb{R}^{d_{\text{out}}}$ — 损失对第 $b$ 个样本、第 $t$ 个 token 处 lora_out 激活的梯度向量</li>
+  <li>$\mathbf{x}_{bt} = \text{lora\_x}[b,t] \in \mathbb{R}^{d_{\text{in}}}$ — 对应位置的 LoRA 输入激活向量（即 $x$ 经 dropout 前）</li>
+  <li>$\mathbf{g}_{bt}^\top \mathbf{x}_{bt} \in \mathbb{R}^{d_{\text{out}}\times d_{\text{in}}}$ — 两个向量的外积，精确等于该 token 对 $\Delta W$ 的梯度贡献</li>
+  <li>求和遍历 batch 内所有文本 token 位置（mask == 2），得到全 batch 的文本梯度矩阵</li>
+</ul>
 直接构造此矩阵代价为 $4096\times4096\times4\text{B}=64\text{MB/层}$，完全不可接受。
 Gram Matrix Trick 用两个小矩阵绕开它。
 </p>
 <h4>推导</h4>
-<p>展开 Frobenius 范数定义：</p>
+<p>以下省略 batch 维 $b$，记 $g_t = \mathbf{g}_{bt}$，$x_t = \mathbf{x}_{bt}$，$t$ 仅遍历文本 token。展开 Frobenius 范数定义：</p>
 $$\|G^t_{\Delta W}\|_F^2
 = \sum_{d,\,i} G^t_{\Delta W}[d,i]^2
 = \sum_{d,\,i} \Bigl(\sum_t g_t[d]\,x_t[i]\Bigr)^2$$
