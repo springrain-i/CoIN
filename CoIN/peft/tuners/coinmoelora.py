@@ -414,8 +414,8 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             #         shape (N,r,d_in) — materialised, tiny
             #   W_B:  G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
             #         shape (N,d_out,r) — materialised, ~0.5MB, freed in hook_B
-            #   ΔW:   gram trick: ||G^t_dW||_F² = Σ_b trace(Kg_b ⊙ Kx_b)
-            #         avoids (d_out×d_in) matrix, ~0.5% compute overhead
+            #   ΔW:   G^t_ΔW = Σ_{b,t∈text} g_bt^T x_bt  shape (d_out,d_in) ≈33MB bf16
+            #         direct construction, exact — acceptable on 8×24GB GPUs
             #
             # Backward order: hook_lora_out → hook_B → hook_A (flushes all)
             # x_ref freed in hook_A; out_A_ref freed in hook_B.
