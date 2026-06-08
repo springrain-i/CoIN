@@ -108,29 +108,31 @@
 <div class="card">
 <p><strong>研究问题</strong>：持续指令微调（T1→T8）中，MoELoRA 的文本梯度是否系统性主导参数更新，且这种主导是否随任务序号单调加剧？</p>
 <p><strong>核心指标</strong>：梯度主导比值，三个视角同时记录（全部精确）</p>
-<p style="margin:.4rem 0">
-$$R_A(k) = \frac{\|G^t_A\|_F}{\|G^v_A\|_F}, \quad
-  R_B(k) = \frac{\|G^t_B\|_F}{\|G^v_B\|_F}, \quad
+
+<div style="text-align:center;margin:.8rem 0">
+$$R_A(k) = \frac{\|G^t_A\|_F}{\|G^v_A\|_F}, \qquad
+  R_B(k) = \frac{\|G^t_B\|_F}{\|G^v_B\|_F}, \qquad
   R_{\Delta W}(k) = \frac{\|G^t_{\Delta W}\|_F}{\|G^v_{\Delta W}\|_F}$$
-$$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F / n_{\text{text}}}{\|G^v_X\|_F / n_{\text{vis}}}, \quad X \in \{A,\,B,\,\Delta W\}$$
-</p>
-<p style="color:var(--dim);font-size:.85rem">其中（全部精确外积求和，全 batch）：</p>
-<p style="margin:.3rem 0;font-size:.85rem">
-$G^t_A[n,r,d] = \sum_{b,\,t\in\text{text}} (\partial L/\partial\text{out}_A)[b,t,n,r]\;\cdot\;\text{lora\_x}[b,t,d]$
-&nbsp;·&nbsp; 形状 $(N,r,d_{\text{in}})$
-</p>
-<p style="margin:.3rem 0;font-size:.85rem">
-$G^t_B[n,d,r] = \sum_{b,\,t\in\text{text}} (\partial L/\partial\text{out}_B)[b,t,n,d]\;\cdot\;\text{out\_A}[b,t,n,r]$
-&nbsp;·&nbsp; 形状 $(N,d_{\text{out}},r)$
-</p>
-<p style="margin:.3rem 0;font-size:.85rem">
-$\|G^t_{\Delta W}\|_F^2 = \sum_b (K_{g,b} \odot K_{x,b})_{\text{sum}}$，其中 $K_{g,b}=g_b g_b^\top$，$K_{x,b}=x_b x_b^\top$（Gram Trick，见 Step 4b）
-</p>
-<table>
+</div>
+<div style="text-align:center;margin:.4rem 0 .9rem">
+$$R_{X,\text{tok}}(k) = \frac{\|G^t_X\|_F \,/\, n_{\text{text}}}{\|G^v_X\|_F \,/\, n_{\text{vis}}}, \qquad X \in \{A,\; B,\; \Delta W\}$$
+</div>
+
+<p style="color:var(--dim);font-size:.85rem;margin-bottom:.3rem">其中（全部精确外积求和，全 batch）：</p>
+<div style="font-size:.87rem;line-height:2">
+&nbsp; $G^t_A\,[n,r,d] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_A}[b,t,n,r] \cdot \text{lora\_x}[b,t,d]$
+  &ensp;—&ensp; 形状 $(N,\,r,\,d_{\text{in}})$<br>
+&nbsp; $G^t_B\,[n,d,r] = \displaystyle\sum_{b,\,t\in\text{text}} \frac{\partial L}{\partial \text{out}_B}[b,t,n,d] \cdot \text{out\_A}[b,t,n,r]$
+  &ensp;—&ensp; 形状 $(N,\,d_{\text{out}},\,r)$<br>
+&nbsp; $\|G^t_{\Delta W}\|_F^2 = \displaystyle\sum_b \bigl(K_{g,b} \odot K_{x,b}\bigr)_{\text{sum}}$，
+  $K_{g,b}=g_b g_b^\top$，$K_{x,b}=x_b x_b^\top$ &ensp;（Gram Trick，见 Step 4b）
+</div>
+
+<table style="margin-top:.9rem">
   <tr><th>预期现象</th><th>对应指标</th></tr>
-  <tr><td>文本梯度始终主导</td><td>所有任务 R_A(k), R_B(k), R_dW(k) > 1</td></tr>
-  <tr><td>主导随任务序列加剧</td><td>R_A(k), R_B(k), R_dW(k) 随 k 单调递增</td></tr>
-  <tr><td>消除 token 数效应后偏置仍成立</td><td>R_A_tok(k), R_B_tok(k), R_dW_tok(k) > 1</td></tr>
+  <tr><td>文本梯度始终主导</td><td>$R_A,\;R_B,\;R_{\Delta W} > 1$（所有任务）</td></tr>
+  <tr><td>主导随任务序列加剧</td><td>$R_A(k),\;R_B(k),\;R_{\Delta W}(k)$ 随 $k$ 单调递增</td></tr>
+  <tr><td>消除 token 数效应后偏置仍成立</td><td>$R_{A,\text{tok}},\;R_{B,\text{tok}},\;R_{\Delta W,\text{tok}} > 1$</td></tr>
   <tr><td>这是视觉模态知识更易被遗忘的机制性原因</td><td>与 text/visual acc 差距相关</td></tr>
 </table>
 </div>
