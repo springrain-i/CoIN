@@ -125,6 +125,8 @@ export CUDAHOSTCXX="${CUDAHOSTCXX:-/usr/bin/g++-9}"
 export PATH="$(dirname "${COIN_PYTHON}"):${PATH}"
 # Redirect torch JIT extension cache to writable /hy-tmp (avoids overlay-fs issues).
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/hy-tmp/torch_extensions}"
+# Reduce CUDA memory fragmentation (OOM mid-training with MoEMoKA 8-expert model).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 
 mkdir -p "${COIN_OUTPUT_ROOT}"
 

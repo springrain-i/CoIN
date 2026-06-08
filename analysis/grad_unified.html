@@ -97,7 +97,8 @@
   <a href="#sec-math">③ 梯度原理</a>
   <a href="#sec-code">④ 代码实现</a>
   <a href="#sec-eng">⑤ 工程问题</a>
-  <a href="#sec-next">⑥ 下一步</a>
+  <a href="#sec-zero3">⑥ 多卡与 ZeRO-3</a>
+  <a href="#sec-next">⑦ 下一步</a>
 </nav>
 
 <!-- ══ 主内容 ══ -->
@@ -593,6 +594,115 @@ _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init</div>
 </div>
 
 <!-- ══════════════════════════════════════════════════════ -->
+<!-- ══════════════════════════════════════════════════════ -->
+<h2 id="sec-zero3">⑥ 多卡训练与 ZeRO-3 的影响分析</h2>
+
+<div class="card">
+<h3>ZeRO-3 内存分片原理</h3>
+<p>ZeRO-3 将三类数据按 GPU 数量 N 平均分片：<strong>模型参数、梯度、optimizer state</strong>。以 7B 模型 8 卡为例：</p>
+<table>
+  <tr><th>数据类型</th><th>标准 DDP（每卡）</th><th>ZeRO-3（每卡）</th></tr>
+  <tr><td>模型参数 bf16</td><td>14 GB</td><td>1.75 GB</td></tr>
+  <tr><td>梯度 bf16</td><td>14 GB</td><td>1.75 GB</td></tr>
+  <tr><td>Adam (m, v) fp32</td><td>28 GB</td><td>3.5 GB</td></tr>
+  <tr><td><strong>合计</strong></td><td><strong>~56 GB</strong></td><td><strong>~7 GB</strong></td></tr>
+</table>
+<p>代价是通信量增加；收益是每卡常驻显存降低 8×，使 8 × 24GB 卡可以训练 7B 模型。</p>
+</div>
+
+<div class="card">
+<h3>All-gather / reduce-scatter 的完整时序</h3>
+<p>以单层 LoRA A 矩阵为例，2 张卡：</p>
+<div class="code">
+<span class="dim"># 平时：每卡只存自己的 shard</span>
+GPU 0 持有: A[0 : r/2, :]
+GPU 1 持有: A[r/2 : r, :]
+
+<span class="dim">── Forward 前 ──────────────────────────────────────────────</span>
+all-gather:  两卡互换 shard → 各自持有完整 A[0:r, :]
+out_A = einsum(lora_x, A)   <span class="dim"># lora_x 是本卡 batch slice</span>
+<span class="hl">用完立刻释放冗余副本，恢复只存 shard</span>
+
+<span class="dim">── Backward 前 ─────────────────────────────────────────────</span>
+all-gather:  再次重建完整 A
+∂L/∂lora_x = einsum(g_out_A, A)     <span class="dim"># 用完整 A 链式传播</span>
+∂L/∂A_local = einsum(g_out_A, lora_x)   <span class="dim"># 本卡 batch 的贡献</span>
+reduce-scatter:  汇总所有卡的 ∂L/∂A，均值后分片存回
+<span class="hl">GPU 0 保留 ∂L/∂A[0:r/2, :]；GPU 1 保留 ∂L/∂A[r/2:r, :]</span>
+</div>
+<div class="note">All-gather 是"借来用，用完还"。参数在内存中只短暂完整存在，不会同时占用 N 份。</div>
+</div>
+
+<div class="card">
+<h3>参数梯度 vs 中间激活梯度</h3>
+<table>
+  <tr><th></th><th>参数梯度 ∂L/∂W</th><th>激活梯度 ∂L/∂h</th></tr>
+  <tr>
+    <td><strong>含义</strong></td>
+    <td>loss 对持久权重的偏导，驱动参数更新</td>
+    <td>loss 对前向过程中间结果的偏导，驱动链式法则向前传播</td>
+  </tr>
+  <tr>
+    <td><strong>形状</strong></td>
+    <td>和权重相同，如 <code>[d_out, d_in]</code></td>
+    <td>和前向输出相同，如 <code>[B, T, d]</code></td>
+  </tr>
+  <tr>
+    <td><strong>ZeRO-3 如何处理</strong></td>
+    <td>reduce-scatter → 分片存储，每卡只有 1/N</td>
+    <td><strong>不分片</strong>，每卡本地流动，ZeRO-3 不干预</td>
+  </tr>
+  <tr>
+    <td><strong>例子</strong></td>
+    <td><code>∂L/∂A</code>，<code>∂L/∂B</code></td>
+    <td><code>∂L/∂out_A</code>，<code>∂L/∂lora_out</code></td>
+  </tr>
+</table>
+<p>我们的三个 hook 全部挂在<strong>激活张量</strong>上，不是参数梯度张量。ZeRO-3 的 reduce-scatter 发生在 hook 触发<strong>之后</strong>，对测量结果无影响。</p>
+<div class="code-file"><span class="dim"># hook 触发时序（相对于 ZeRO-3 操作）</span>
+backward 开始
+  all-gather A, B（重建完整参数）
+  计算激活梯度 g_out_A, g_out_B, g_lora_out
+<span class="hl">  → hook_lora_out 触发  ← 在此捕获 G^t_ΔW</span>
+<span class="hl">  → hook_B 触发         ← 在此捕获 G^t_B</span>
+<span class="hl">  → hook_A 触发         ← 在此捕获 G^t_A，flush CSV</span>
+  reduce-scatter ∂L/∂A, ∂L/∂B      ← ZeRO-3 分片梯度
+  释放 all-gathered 参数
+</div>
+</div>
+
+<div class="card">
+<h3>多卡 CSV 合并策略</h3>
+<p>每张卡处理不同的 micro-batch，hook 捕获的是该卡 batch slice 的局部贡献。多卡合并时，<strong>必须先平均 G 值，再计算 R</strong>，不能先算 R 再平均。</p>
+<div class="code">
+<span class="dim"># 示例（2 卡）</span>
+rank0: G_text_A = 0.30,  G_vis_A = 0.015  →  R = 20.0
+rank1: G_text_A = 0.32,  G_vis_A = 0.013  →  R = 24.6
+
+<span class="dim"># 错误：先算 R 再平均</span>
+R_wrong = mean(20.0, 24.6) = 22.3
+
+<span class="dim"># 正确：先平均 G 再算 R</span>
+G_text_merged = mean(0.30, 0.32) = 0.31
+G_vis_merged  = mean(0.015, 0.013) = 0.014
+<span class="hl">R_correct = 0.31 / 0.014 = 22.1</span>
+</div>
+<p>数学上，正确合并等价于：</p>
+$$R_\text{merged} = \frac{\sum_k G^t_k}{\sum_k G^v_k}$$
+<p>分子分母同除以 N，约掉后正好是"把所有卡的文本贡献加总 / 视觉贡献加总"，与 DDP all-reduce 后实际参数更新方向一致。</p>
+<p>合并脚本：<code>scripts/analysis/merge_grad_csvs.py --input_dir analysis/gradient_dominance --output_dir analysis/gradient_dominance/merged</code></p>
+</div>
+
+<div class="card">
+<h3>局部梯度能代表全局的理论依据</h3>
+<p>直觉：只要数据随机打乱后分配，各卡 batch 中的文本/视觉比例近似相同，局部 R 与全局 R 应非常接近。</p>
+<p>形式化：设全局样本集 $\mathcal{D}$，各卡处理不相交子集 $\mathcal{D}_k$（随机分配）：</p>
+$$R_k = \frac{\sum_{i \in \mathcal{D}_k} G^t_i}{\sum_{i \in \mathcal{D}_k} G^v_i} \approx \frac{\mathbb{E}[G^t]}{\mathbb{E}[G^v]} = R_\text{global}$$
+<p>当 batch size 足够大（我们的 effective batch = 128），这个近似误差可忽略。合并后的 R 则是精确的全局值：</p>
+$$R_\text{merged} = \frac{\sum_k \sum_{i \in \mathcal{D}_k} G^t_i}{\sum_k \sum_{i \in \mathcal{D}_k} G^v_i} = \frac{\sum_{i \in \mathcal{D}} G^t_i}{\sum_{i \in \mathcal{D}} G^v_i} = R_\text{global}$$
+<div class="note">唯一例外：若各卡 batch 有系统性偏斜（如某卡总分配纯文本任务）。标准 DataLoader shuffle 保证不会发生此情况。</div>
+</div>
+
 <h2 id="sec-next">⑦ 下一步计划</h2>
 <div class="card">
 <table>

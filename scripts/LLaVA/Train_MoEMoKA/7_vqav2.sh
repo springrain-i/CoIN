@@ -26,7 +26,7 @@ require_path "${PREVIOUS_TASK_MODEL_PATH}" "previous task checkpoint"
 
 ${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Train/LLaVA/train_mem.py \
     --deepspeed "${COIN_DS_CONFIG:-./scripts/zero3.json}" \
-    --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
+    --lora_enable True --moe_moka_enable True --lora_r 32 --lora_alpha 64 --mm_projector_lr 2e-5 \
     --expert_num 8 \
     --model_name_or_path "${COIN_BASE_MODEL}" \
     --previous_task_model_path "${PREVIOUS_TASK_MODEL_PATH}" \
@@ -45,7 +45,7 @@ ${COIN_DEEPSPEED} --include "${COIN_DS_INCLUDE}" --master_port 29600 ETrain/Trai
     --num_train_epochs 1 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 16 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "epoch" \
     --learning_rate 2e-4 \
