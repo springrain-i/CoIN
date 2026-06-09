@@ -141,14 +141,6 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
     <td>$A_{tt}$（答案 text query → 文本 key）</td>
     <td class="signal-high">偏高：答案生成时 text token 形成自闭回路</td>
   </tr>
-  <tr>
-    <td>$A_{vt}$（视觉 query → 文本 key）</td>
-    <td class="signal-high">偏高：视觉 token 被文本强烈吸引</td>
-  </tr>
-  <tr>
-    <td>$A_{vv}$（视觉 query → 视觉 key）</td>
-    <td class="signal-low">偏低：视觉自注意力被削弱</td>
-  </tr>
 </table>
 <div class="note"><strong>核心信号</strong>：$R_\text{att-text} = A_{tt} / (A_{tt} + A_{tv})$ 随任务序号递增，说明持续学习让答案生成 token 在回答阶段越来越少关注视觉内容（指标限定在 post-image text query，排除了系统 prompt 等因因果掩码无法 attend 视觉 token 的位置，详见附录 B-1）。</div>
 </div>
@@ -156,31 +148,23 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
 <!-- ══════════════════════════════════════════════════════ -->
 <h2 id="sec-metrics">③ 指标定义</h2>
 <div class="card">
-<h3>四个注意力预算占比</h3>
-<p>对每个 (head, query)，先对目标模态的全部 key <strong>求和</strong>，得到该 query 分配给此模态的"预算占比"，再取均值。<strong>文本 query（A<sub>tt</sub>、A<sub>tv</sub>）仅统计 post-image 位置</strong>（最后一个 visual token 之后的答案生成 token，其因果窗口内同时可见文本 key 与视觉 key）；视觉 query（A<sub>vt</sub>、A<sub>vv</sub>）使用全部 visual token 位置：</p>
+<h3>两个注意力预算占比</h3>
+<p>query 限定为 post-image 位置（最后一个 visual token 之后的答案生成 token），对每个 (head, query) 先对目标模态的全部 key <strong>求和</strong>，再对所有 (batch, head, query position) 取均值：</p>
 $$A_{tt} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
 $$A_{tv} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
-$$A_{vt} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
-$$A_{vv} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
 <p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last\_vis\_pos},\; \text{token\_mask}[q]=2\}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
-<div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$ &emsp; $A_{vt}+A_{vv} \approx 1$</div>
-<p>两行各自加和为 1，由 softmax 归一化性质直接保证，无需额外归一化步骤。</p>
+<div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$（softmax 归一化直接保证，无需额外处理）</div>
 
-<h3>两个派生比值</h3>
+<h3>派生比值</h3>
 <table>
   <tr><th>列名</th><th>公式</th><th>含义</th></tr>
   <tr>
     <td><code>R_att_text</code></td>
     <td>$A_{tt} / (A_{tt} + A_{tv})$</td>
-    <td>答案生成 text query 注意力预算中分配给文本 key 的比例（$\approx A_{tt}$，因分母 $\approx 1$）</td>
-  </tr>
-  <tr>
-    <td><code>R_att_vis</code></td>
-    <td>$A_{vt} / (A_{vt} + A_{vv})$</td>
-    <td>视觉 query 注意力预算中分配给文本 key 的比例（高 = 视觉被拉向文本）</td>
+    <td>答案生成时注意力预算中分配给文本 key 的比例（$\approx A_{tt}$，因分母 $\approx 1$）</td>
   </tr>
 </table>
-<div class="note">归一化后 <code>R_att_text ≈ A_tt</code>，直接读 A_tt 列即可判断过文本化程度。与梯度指标 R_A / R_dW 的区别：梯度指标反映参数<strong>更新</strong>的偏向，注意力指标反映前向传播中信息<strong>流动</strong>的偏向。两者可能不同步，联合分析更完整。</div>
+<div class="note"><code>R_att_text ≈ A_tt</code>，直接读 A_tt 列即可判断过文本化程度。与梯度指标 R_A / R_dW 的区别：梯度指标反映参数<strong>更新</strong>的偏向，注意力指标反映前向传播中信息<strong>流动</strong>的偏向。两者可能不同步，联合分析更完整。</div>
 </div>
 
 <!-- ══════════════════════════════════════════════════════ -->
@@ -268,18 +252,18 @@ model._apply_lora_token_mask = types.MethodType(_patched_apply, model)</div>
 <h2 id="sec-csv">⑥ CSV 格式</h2>
 <div class="card">
 <h3>attn_stats.csv（每条记录 = 一个 micro-batch × 一层）</h3>
-<div class="code">step, layer, A_tt, A_tv, A_vt, A_vv, R_att_text, R_att_vis, n_post_text, n_vis
+<div class="code">step, layer, A_tt, A_tv, R_att_text, n_post_text
 
-0, model.layers.0.self_attn,  0.874, 0.126, 0.243, 0.757,  0.874, 0.243,  12, 576
-0, model.layers.1.self_attn,  0.861, 0.139, 0.251, 0.749,  0.861, 0.251,  12, 576
+0, model.layers.0.self_attn,  0.874, 0.126,  0.874,  12
+0, model.layers.1.self_attn,  0.861, 0.139,  0.861,  12
 ...
-# 注：n_post_text = post-image 答案生成 token 均值（非全文本 token 数）；A_tt+A_tv ≈ 1，A_vt+A_vv ≈ 1</div>
+# 注：n_post_text = post-image 答案生成 token 均值；A_tt+A_tv ≈ 1；R_att_text ≈ A_tt</div>
 
 <h3>attn_summary.csv（每行 = 一层的跨所有 step 的均值 + 全局行）</h3>
-<div class="code">scope,  layer,               mean_A_tt, mean_A_tv, mean_A_vt, mean_A_vv, R_att_text, R_att_vis, n_steps
-layer,  model.layers.0...,  0.874,     0.126,     0.243,     0.757,     0.874,      0.243,     100
+<div class="code">scope,  layer,               mean_A_tt, mean_A_tv, R_att_text, n_steps
+layer,  model.layers.0...,  0.874,     0.126,     0.874,      100
 ...
-global, ALL,                0.869,     0.131,     0.238,     0.762,     0.869,      0.238,     3200</div>
+global, ALL,                0.869,     0.131,     0.869,      3200</div>
 
 <h3>与 grad_stats.csv 对齐方式</h3>
 <p>两份 CSV 的 <code>step</code> 和 <code>layer</code> 列语义相同，可直接 join：</p>
