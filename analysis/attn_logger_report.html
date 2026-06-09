@@ -152,7 +152,7 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
 <p>query 限定为 post-image 位置（最后一个 visual token 之后的答案生成 token），对每个 (head, query) 先对目标模态的全部 key <strong>求和</strong>，再对所有 (batch, head, query position) 取均值：</p>
 $$A_{tt} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
 $$A_{tv} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
-<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last\_vis\_pos},\; \text{token\_mask}[q]=2\}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
+<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last-vis-pos},\; \text{token-mask}[q]=2\}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
 <div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$（softmax 归一化直接保证，无需额外处理）</div>
 
 <h3>派生比值</h3>
@@ -364,7 +364,7 @@ bash scripts/LLaVA/Train_MOE/run_grad_t1_single.sh 1</div>
   <p>修复后指标定义：</p>
   $$A_{tt} = \mathbb{E}_{b,h,\,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
   $$A_{tv} = \mathbb{E}_{b,h,\,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
-  <p style="color:var(--dim);font-size:.85rem">其中 post-img-text = $\{q : q > \text{last\_vis\_pos},\; \text{token\_mask}[q]=2\}$</p>
+  <p style="color:var(--dim);font-size:.85rem">其中 post-img-text = $\{q : q > \text{last-vis-pos},\; \text{token-mask}[q]=2\}$</p>
 
   <h3>代码实现（attention_logger.py &middot; _record）</h3>
   <pre style="background:var(--bg2);border-radius:6px;padding:1rem;font-size:.82rem;overflow-x:auto"><code>vis_positions   = v_mask.nonzero(as_tuple=True)[0]
