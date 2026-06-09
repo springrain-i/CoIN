@@ -354,27 +354,90 @@ bash scripts/LLaVA/Train_MOE/run_grad_t1_single.sh 1</div>
 </div>
 </div>
 
-<div class="section" id="b2-aggregation">
-  <h2>附录：B-2 批内聚合方式争议（供审阅）</h2>
-  <p style="color:var(--dim);font-size:.85rem">更新日期：2026-06-09 · 经 review_attn_logger.md 审稿意见触发</p>
-  <h3>问题描述</h3>
-  <p><code>_record()</code> 在同一 optimizer step 内统计一个 batch 的 A_tt / A_tv 时，需要把多个 batch element 的局部均值聚合为一个标量。存在两种方案：</p>
-  <table>
-    <thead><tr><th>方案</th><th>公式</th><th>语义</th></tr></thead>
-    <tbody>
-      <tr><td><strong>等权均值</strong>（旧实现）</td><td><code>(A_tt_0+...+A_tt_{B-1})/B</code></td><td>每个样本等权；长答案与短答案样本贡献相同</td></tr>
-      <tr><td><strong>token 加权均值</strong>（当前实现）</td><td><code>(A_tt_0·n_0+...)/Σn_b</code></td><td>每个 post-image text token 等权</td></tr>
-    </tbody>
-  </table>
-  <h3>为什么选 token 加权均值</h3>
-  <p>当 element 0 只有 1 个答案 token，element 1 有 50 个时：等权均值把方差极大的 1-token 估计和稳定的 50-token 估计同等对待，引入不必要噪声。token 加权均值等价于在整个 batch 所有 post-image text query token 上直接求均值，是对"step 内平均 A_tv"最自然的无偏估计量。</p>
-  <h3>等权均值的合理性（反方论点）</h3>
-  <p>若分析单位是"每道题"而非"每个 token"，等权均值更合适，token 加权均值会让长答案样本主导。在 CoIN 多任务场景中，不同 task 答案长度差异大（SciQA 短、TextVQA 长），若 batch 内 task 分布不均，token 加权可能隐式偏向长答案任务。</p>
-  <h3>当前决定</h3>
-  <div class="note" style="border-color:var(--blue);background:rgba(88,166,255,.06)">
-    <strong>采用 token 加权均值</strong>（已实现，见 B-1+B-2 修复 commit）。分析单位是"答案 token 的注意力行为"，token 级等权符合该定义。若后续发现长/短样本行为差异显著，可输出 per-element A_tv 分布图加以对比。
+<div class="section" id="b1-causal-fix">
+  <h2>附录 B-1：因果注意力混淆修复（供审阅）</h2>
+  <p style="color:var(--dim);font-size:.85rem">来源：review_attn_logger.md &middot; P0 &middot; 已修复于 commit fd15cdb</p>
+
+  <h3>问题根源</h3>
+  <p>LLaVA 的序列结构如下：</p>
+  <pre style="background:var(--bg2);border-radius:6px;padding:1rem;font-size:.85rem;overflow-x:auto">[系统 prompt，100&ndash;400 text tokens] &rarr; [用户指令前半段] &rarr; [576 visual tokens] &rarr; [答案 tokens]</pre>
+  <p>因果掩码（causal mask）要求：位置 <em>i</em> 的 query 只能 attend 到位置 &le; <em>i</em> 的 key。因此，<strong>图像之前的文本 tokens</strong> 物理上无法 attend 到任何视觉 token，其 softmax 权重对视觉 key 恒为 0：</p>
+  <div class="note" style="margin:.5rem 0">对 pre-image text token：$A_{tv} = 0$，$A_{tt} \approx 1$ &mdash; 这是因果结构的数学必然，不是模型行为。</div>
+  <p>旧实现对<strong>所有文本 query 位置</strong>求均值，包含系统 prompt（通常占文本 token 多数）。结果：$R_{\text{att\_text}}$ 被拉高到接近 1，与模型是否过文本化无关，是测量设计缺陷。对比 MoELoRA 和 MoEMoKA 时，两者的 A_tv 均被等幅压低，差异信号被噪声淹没。</p>
+
+  <h3>修复：限定为 post-image text query</h3>
+  <p>只统计<strong>最后一个 visual token 之后</strong>的文本 query 位置（即真正的答案生成 token）。这些 token 的因果窗口内同时包含文本 key 和视觉 key，$A_{tv}$ 才反映真实的模态注意力分配。</p>
+  <p>修复后指标定义：</p>
+  $$A_{tt} = \mathbb{E}_{b,h,\,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
+  $$A_{tv} = \mathbb{E}_{b,h,\,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
+  <p style="color:var(--dim);font-size:.85rem">其中 post-img-text = $\{q : q > \text{last\_vis\_pos},\; \text{token\_mask}[q]=2\}$</p>
+
+  <h3>代码实现（attention_logger.py &middot; _record）</h3>
+  <pre style="background:var(--bg2);border-radius:6px;padding:1rem;font-size:.82rem;overflow-x:auto"><code>vis_positions   = v_mask.nonzero(as_tuple=True)[0]
+last_vis_pos    = int(vis_positions[-1])
+
+post_img_t_mask = t_mask.clone()
+post_img_t_mask[:last_vis_pos + 1] = False   # 排除图像之前（含）的文本
+
+if not post_img_t_mask.any():
+    continue   # 该样本无答案 token，跳过
+
+w_tq = w[:, post_img_t_mask, :]          # [H, T_post, T_k]
+A_tt = w_tq[:, :, t_mask].sum(-1).mean().item()
+A_tv = w_tq[:, :, v_mask].sum(-1).mean().item()</code></pre>
+
+  <div class="note" style="border-color:var(--green);background:rgba(114,211,142,.06)">
+    <strong>影响</strong>：修复前 A_tv 因系统 prompt 强制稀释普遍偏低，两模型差异信号被淹没。修复后，A_tv 反映答案生成阶段真实的视觉注意力分配，可用于论证"持续学习是否加剧过文本化"的核心假设。
   </div>
 </div>
+
+<div class="section" id="b2-aggregation">
+  <h2>附录 B-2：批内聚合方式讨论（供审阅）</h2>
+  <p style="color:var(--dim);font-size:.85rem">来源：review_attn_logger.md &middot; P2 &middot; 当前采用方案 B，欢迎讨论</p>
+
+  <h3>问题背景</h3>
+  <p>一个 optimizer step 内，batch 中每个 element <em>b</em> 有 $n_b$ 个 post-image text query token，其局部均值为 $A_{tv}^{(b)}$（已在 $H \times n_b$ 个位置上平均）。问题：如何把 $B$ 个局部均值聚合为一个 step 级标量？</p>
+
+  <h3>方案 A：等权均值（旧实现，已废弃）</h3>
+  $$A_{tv}^{\text{step}} = \frac{1}{B}\sum_{b=1}^{B} A_{tv}^{(b)}$$
+  <p><strong>语义</strong>：每道题（每个 batch element）等权，无论该题有多少答案 token。</p>
+  <pre style="background:var(--bg2);border-radius:6px;padding:1rem;font-size:.82rem;overflow-x:auto"><code>A_tv_total += A_tv_b          # 每个 element +1 次，等权
+result = A_tv_total / valid_b  # 除以有效 element 数</code></pre>
+  <p><strong>问题</strong>：element 0 有 $n_0=1$ 个答案 token（高方差，如 SciQA 简答），element 1 有 $n_1=50$ 个答案 token（低方差，如 TextVQA 长答案）。等权合并使二者方差不对等，step 级统计噪声偏大。</p>
+
+  <h3>方案 B：token 加权均值（当前实现）</h3>
+  $$A_{tv}^{\text{step}} = \frac{\displaystyle\sum_{b=1}^{B} n_b \cdot A_{tv}^{(b)}}{\displaystyle\sum_{b=1}^{B} n_b}$$
+  <p><strong>语义</strong>：每个 post-image text query token 等权。等价于在 batch 内所有答案 token 上直接求均值——随机抽一个答案 token，其 $A_{tv}$ 的期望值。</p>
+  <pre style="background:var(--bg2);border-radius:6px;padding:1rem;font-size:.82rem;overflow-x:auto"><code>A_tv_wsum         += A_tv_b * n_post   # 按 token 数加权累积
+n_post_text_total += n_post
+result = A_tv_wsum / n_post_text_total  # 每 token 等权</code></pre>
+  <p><strong>优点</strong>：token 数多的 element 对均值贡献更大，但其局部均值本身也更稳定（方差更小），整体 step 统计量方差降低。</p>
+
+  <h3>两方案对比（供学长讨论）</h3>
+  <table>
+    <thead>
+      <tr><th>维度</th><th>方案 A（等权，旧）</th><th>方案 B（token 加权，当前）</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>分析单位</td><td>每道题</td><td>每个答案 token</td></tr>
+      <tr><td>短答案样本权重</td><td>与长答案相同</td><td>按 token 数比例缩小</td></tr>
+      <tr><td>step 均值方差</td><td>较大（受单 token 高方差估计影响）</td><td>较小（token 多的样本贡献更稳定）</td></tr>
+      <tr><td>CoIN 多任务 task 偏差</td><td>无隐式 task 偏差</td><td>TextVQA 等长答案 task 隐式获得更高权重</td></tr>
+      <tr><td>概率解释</td><td>"随机抽一道题，其 A_tv 的期望"</td><td>"随机抽一个答案 token，其 A_tv 的期望"</td></tr>
+      <tr><td>与论文研究问题的匹配</td><td>"不同 task 的过文本化程度差异"</td><td>"生成 token 时的模态注意力行为"</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note" style="border-color:var(--yellow);background:rgba(210,153,34,.06)">
+    <strong>待讨论</strong>：若核心研究问题是"不同 task 之间的过文本化程度是否有差异"，方案 A 的等权语义更合适（每道题等权，避免 TextVQA 长答案主导均值）。若研究问题是"生成过程中模型逐 token 的注意力行为如何随 task 序列演变"，方案 B 更自然。请学长确认分析目标后决定。
+  </div>
+
+  <h3>当前决定</h3>
+  <div class="note" style="border-color:var(--blue);background:rgba(88,166,255,.06)">
+    <strong>暂采用方案 B</strong>（commit <code>fd15cdb</code>）。切换回方案 A 只需改 3 行代码，随时可调整。
+  </div>
+</div>
+
 <p style="color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center">
   CoIN · grad_attn 分支 · AttentionLogger · 2026-06-09
 </p>
