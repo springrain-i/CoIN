@@ -170,8 +170,8 @@ class AttentionLogger:
             A_tv_total / valid_b,
             A_vt_total / valid_b,
             A_vv_total / valid_b,
-            n_text_total // valid_b,
-            n_vis_total  // valid_b,
+            n_text_total / valid_b,
+            n_vis_total  / valid_b,
         ))
 
     def save_csv(self, task_name: str) -> str:

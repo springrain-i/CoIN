@@ -154,7 +154,7 @@ def forward_sdpa(
                 elif is_causal:
                     cm = ~torch.tril(torch.ones(
                         q_len, kv_seq_len, dtype=torch.bool, device=query_states.device))
-                    logits.masked_fill_(cm[None, None], float("-inf"))
+                    logits = logits.masked_fill(cm[None, None], float("-inf"))
                 w = torch.softmax(logits.float(), dim=-1).to(query_states.dtype)
                 layer_name = getattr(self, '_attn_layer_name', 'unknown')
                 logger_ref._record(step, layer_name, w, token_mask)

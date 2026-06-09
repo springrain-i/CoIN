@@ -155,15 +155,17 @@ This prevents text gradient from contaminating the visual compression subspace.
 **2. Task-centric cross-attention (cross-modal interaction):**
 After unimodal compression, non-text (visual) tokens attend to text tokens as keys/values. This injects task-description context into visual representations. Text tokens themselves are left unchanged.
 ```
-Att(A^v x^v, A^t x^t, A^t x^t) = softmax( (A^v x^v)(A^t x^t)^T / sqrt(N_t) ) · A^t x^t
+Att(A^v x^v, A^t x^t, A^t x^t) = softmax( (A^v x^v)(A^t x^t)^T / sqrt(r_per) ) · A^t x^t
+# Note: paper writes sqrt(N_t) but implementation uses sqrt(r_per) — standard scaled dot-product
+# attention scaling; sqrt(N_t) would vary with sequence length causing unstable softmax sharpness.
 Enhanced visual: A^v x^v + Att(...)
 ```
 No extra linear projections W_q/W_k/W_v — the A matrices already serve as projections.
 
-**3. Shared multimodal B:**
-A single B projects the enhanced unimodal representations into the output space, facilitating cross-modal alignment.
+**3. Shared multimodal B (single-LoRA MoKA only):**
+In the original single-LoRA MoKA, one B projects all enhanced representations into the output space, enforcing cross-modal alignment. This "shared B" description applies to the base MoKA paper which has exactly one LoRA adapter per linear layer.
 
-Final forward:
+Final forward (MoKA, single LoRA):
 ```
 h = W_0 x + [B·A^t x^t  ;  B·(A^v x^v + Att_{v,t,t})  ]
              ↑ unimodal   ↑ unimodal + cross-modal
@@ -195,13 +197,13 @@ The existing token mask infrastructure (`text=2, vision=1, pad=0` in `llava_arch
 
 ### MoE-MoKA design
 
-Extend MoKA with N experts, each holding its own `(A^text_i, A^visual_i)` pair, with a shared `B`. Routing is soft (softmax-weighted sum), same as current `coinmoelora.py`. The cross-attention module can be either per-expert or shared — shared is simpler and sufficient for a first version.
+Extend MoKA with N experts. Each expert holds its own `(A^text_i, A^visual_i, B_i)` triple — **per-expert B is intentional**, following the same convention as the original CoIN MoE-LoRA baseline where each expert is fully independent. This differs from the single-LoRA MoKA paper (which has one shared B) because in a mixture-of-experts setting there is no single "shared" projection. Routing is soft (softmax-weighted sum). Cross-attention can be per-expert or shared; current implementation uses per-expert for consistency.
 
 ```
-ΔW·x = B · Σ_i  w_i · [A^text_i · x^text ;  A^visual_i · x^visual + Att_i(...)]
+ΔW·x = Σ_i  w_i · B_i · [A^text_i · x^text ;  A^visual_i · x^visual + Att_i(...)]
 ```
 
-where `w_i` is the soft routing weight for expert i (router input = mean pooled token representation or a learned task embedding).
+where `w_i` is the soft routing weight for expert i, computed from the original (pre-dropout) input `x` via a learned linear router, then softmax. Expert A and B matrices receive dropout-regularized input (same as CoIN baseline).
 
 ---
 
