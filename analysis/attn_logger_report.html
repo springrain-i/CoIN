@@ -92,6 +92,10 @@
   <a href="#sec-csv">⑥ CSV 格式</a>
   <a href="#sec-run">⑦ 启动方式</a>
   <a href="#sec-next">⑧ 下一步</a>
+  <div style="border-top:1px solid var(--border);margin:.7rem 0"></div>
+  <div class="sidebar-title" style="margin-top:.4rem">附录</div>
+  <a href="#b1-causal-fix">B-1 因果修复</a>
+  <a href="#b2-aggregation">B-2 聚合讨论</a>
 </nav>
 
 <main class="content">
@@ -130,12 +134,12 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
 <table>
   <tr><th>指标</th><th>过文本化时的预期表现</th></tr>
   <tr>
-    <td>$A_{tv}$（文本 query → 视觉 key）</td>
-    <td class="signal-low">偏低：文本 token 不关注视觉内容</td>
+    <td>$A_{tv}$（答案 text query → 视觉 key）</td>
+    <td class="signal-low">偏低：答案生成时 text token 不关注视觉内容</td>
   </tr>
   <tr>
-    <td>$A_{tt}$（文本 query → 文本 key）</td>
-    <td class="signal-high">偏高：文本 token 形成自闭回路</td>
+    <td>$A_{tt}$（答案 text query → 文本 key）</td>
+    <td class="signal-high">偏高：答案生成时 text token 形成自闭回路</td>
   </tr>
   <tr>
     <td>$A_{vt}$（视觉 query → 文本 key）</td>
@@ -146,19 +150,19 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
     <td class="signal-low">偏低：视觉自注意力被削弱</td>
   </tr>
 </table>
-<div class="note"><strong>核心信号</strong>：$R_\text{att-text} = A_{tt} / (A_{tt} + A_{tv})$ 随任务序号递增，说明持续学习让 text token 越来越忽视 visual 内容。</div>
+<div class="note"><strong>核心信号</strong>：$R_\text{att-text} = A_{tt} / (A_{tt} + A_{tv})$ 随任务序号递增，说明持续学习让答案生成 token 在回答阶段越来越少关注视觉内容（指标限定在 post-image text query，排除了系统 prompt 等因因果掩码无法 attend 视觉 token 的位置，详见附录 B-1）。</div>
 </div>
 
 <!-- ══════════════════════════════════════════════════════ -->
 <h2 id="sec-metrics">③ 指标定义</h2>
 <div class="card">
 <h3>四个注意力预算占比</h3>
-<p>对每个 (head, query)，先对目标模态的全部 key <strong>求和</strong>，得到该 query 分配给此模态的"预算占比"，再对所有 (batch, head, query position) 取均值：</p>
-$$A_{tt} = \mathbb{E}_{b,h,q\in\text{text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
-$$A_{tv} = \mathbb{E}_{b,h,q\in\text{text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
+<p>对每个 (head, query)，先对目标模态的全部 key <strong>求和</strong>，得到该 query 分配给此模态的"预算占比"，再取均值。<strong>文本 query（A<sub>tt</sub>、A<sub>tv</sub>）仅统计 post-image 位置</strong>（最后一个 visual token 之后的答案生成 token，其因果窗口内同时可见文本 key 与视觉 key）；视觉 query（A<sub>vt</sub>、A<sub>vv</sub>）使用全部 visual token 位置：</p>
+$$A_{tt} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
+$$A_{tv} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
 $$A_{vt} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
 $$A_{vv} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
-<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
+<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last\_vis\_pos},\; \text{token\_mask}[q]=2\}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
 <div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$ &emsp; $A_{vt}+A_{vv} \approx 1$</div>
 <p>两行各自加和为 1，由 softmax 归一化性质直接保证，无需额外归一化步骤。</p>
 
@@ -168,7 +172,7 @@ $$A_{vv} = \mathbb{E}_{b,h,q\in\text{vis}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,
   <tr>
     <td><code>R_att_text</code></td>
     <td>$A_{tt} / (A_{tt} + A_{tv})$</td>
-    <td>文本 query 注意力预算中分配给文本 key 的比例（$\approx A_{tt}$，因分母 $\approx 1$）</td>
+    <td>答案生成 text query 注意力预算中分配给文本 key 的比例（$\approx A_{tt}$，因分母 $\approx 1$）</td>
   </tr>
   <tr>
     <td><code>R_att_vis</code></td>
@@ -264,12 +268,12 @@ model._apply_lora_token_mask = types.MethodType(_patched_apply, model)</div>
 <h2 id="sec-csv">⑥ CSV 格式</h2>
 <div class="card">
 <h3>attn_stats.csv（每条记录 = 一个 micro-batch × 一层）</h3>
-<div class="code">step, layer, A_tt, A_tv, A_vt, A_vv, R_att_text, R_att_vis, n_text, n_vis
+<div class="code">step, layer, A_tt, A_tv, A_vt, A_vv, R_att_text, R_att_vis, n_post_text, n_vis
 
-0, model.layers.0.self_attn,  0.874, 0.126, 0.243, 0.757,  0.874, 0.243,  612, 576
-0, model.layers.1.self_attn,  0.861, 0.139, 0.251, 0.749,  0.861, 0.251,  612, 576
+0, model.layers.0.self_attn,  0.874, 0.126, 0.243, 0.757,  0.874, 0.243,  12, 576
+0, model.layers.1.self_attn,  0.861, 0.139, 0.251, 0.749,  0.861, 0.251,  12, 576
 ...
-# 注：A_tt+A_tv ≈ 1，A_vt+A_vv ≈ 1（归一化保证）；R_att_text ≈ A_tt</div>
+# 注：n_post_text = post-image 答案生成 token 均值（非全文本 token 数）；A_tt+A_tv ≈ 1，A_vt+A_vv ≈ 1</div>
 
 <h3>attn_summary.csv（每行 = 一层的跨所有 step 的均值 + 全局行）</h3>
 <div class="code">scope,  layer,               mean_A_tt, mean_A_tv, mean_A_vt, mean_A_vv, R_att_text, R_att_vis, n_steps
@@ -350,7 +354,13 @@ bash scripts/LLaVA/Train_MOE/run_grad_t1_single.sh 1</div>
 </table>
 
 <div class="note" style="border-color:var(--green);background:rgba(114,211,142,.06)">
-  <strong>已解决</strong>：<code>_record()</code> 对 key 维度先 <code>.sum(-1)</code> 再 <code>.mean()</code>，而非直接 <code>.mean()</code>。数值测试（交错 text/visual 序列）确认 <code>A_tt+A_tv = 1.000000</code>，<code>A_vt+A_vv = 1.000000</code>（commit 2aa6961）。
+  <strong>已解决（key 维度求和，commit 2aa6961）</strong>：<code>_record()</code> 对 key 维度先 <code>.sum(-1)</code> 再 <code>.mean()</code>，确认 <code>A_tt+A_tv = 1.000000</code>，<code>A_vt+A_vv = 1.000000</code>。
+</div>
+<div class="note" style="border-color:var(--green);background:rgba(114,211,142,.06);margin-top:.5rem">
+  <strong>已解决（因果注意力混淆 B-1，commit fd15cdb）</strong>：A_tt / A_tv 的文本 query 限定为 post-image 位置（答案生成 token），排除系统 prompt 等因因果掩码无法 attend 视觉 key 的位置。详见附录 B-1。
+</div>
+<div class="note" style="border-color:var(--green);background:rgba(114,211,142,.06);margin-top:.5rem">
+  <strong>已解决（批内聚合方式 B-2，commit fd15cdb）</strong>：从等权均值改为 token 加权均值（方案 B），降低单 token 高方差样本对 step 统计量的干扰。两种方案语义对比见附录 B-2。
 </div>
 </div>
 
