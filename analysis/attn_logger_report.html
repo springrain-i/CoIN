@@ -149,11 +149,29 @@ analysis/attn_dominance/T1_ScienceQA_rank0_attn_summary.csv     ← 新增</div>
 <h2 id="sec-metrics">③ 指标定义</h2>
 <div class="card">
 <h3>两个注意力预算占比</h3>
-<p>query 限定为 post-image 位置（最后一个 visual token 之后的答案生成 token），对每个 (head, query) 先对目标模态的全部 key <strong>求和</strong>，再对所有 (batch, head, query position) 取均值：</p>
-$$A_{tt} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text}} w_{bh,q,k}\right]$$
+
+<p><strong>测量背景（teacher forcing 训练正向传播）</strong>：训练时整条序列一次喂入：</p>
+<div class="code" style="font-size:.82rem">[sys-prompt text] → [user instruction text] → [576 visual tokens] → [answer tokens (GT)]</div>
+<p>因果掩码保证位置 $q$ 只能 attend 到位置 $\le q$ 的 K，但所有位置的 Q <strong>同时</strong>计算（非自回归逐步生成）。<br>
+指标限定在 post-image text query，即最后一个 visual token <strong>之后</strong>的答案 token 位置。</p>
+
+<p>对每个这样的 query 位置 $q$，将其 softmax 权重按 key 的模态分组求和：</p>
+
+$$A_{tt} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{text},\,k\le q} w_{bh,q,k}\right]$$
 $$A_{tv} = \mathbb{E}_{b,h,q\in\text{post-img-text}}\!\left[\sum_{k\in\text{vis}} w_{bh,q,k}\right]$$
-<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last-vis-pos},\; \text{token-mask}[q]=2\}$。padding key 被 attention mask 置 $-\infty$，softmax 后权重 $\approx 0$，因此：</p>
-<div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} \approx 1$（softmax 归一化直接保证，无需额外处理）</div>
+
+<p>其中 $w_{bh,q,k} = \text{softmax}(QK^T/\sqrt{d})_{bh,q,k}$，post-img-text $= \{q : q > \text{last-vis-pos},\; \text{token-mask}[q]=2\}$。</p>
+
+<div class="warn-box" style="font-size:.85rem">
+  <strong>⚠ text key 的范围</strong>：token-mask = 2 标记<em>所有</em>文本位置，包括 sys-prompt、用户指令，以及位置 $q$ <em>之前</em>的答案 token。因此 $A_{tt}$ 含有"答案 attend 到自身之前答案"的权重。<br>
+  对序列中<strong>第一个</strong>答案 token，text key 只含 sys-prompt + 用户指令，此时 $A_{tt} + A_{tv} = 1$（无 padding）。对后续答案 token，text key 中额外包含前若干个答案 token。
+</div>
+
+<p><strong>为什么是 $\approx 1$ 而不是 $= 1$？</strong><br>
+对任意 query，softmax 权重在所有 K 位置（含 padding）上精确求和为 1：
+$$A_{tt} + A_{tv} + A_{t,\text{pad}} = 1$$
+padding 位置被 attention mask 置为 $-\infty$，理论贡献为 0，但 float32 中 $e^{-\infty}$ 有极小 subnormal 误差（$< 10^{-7}$），故：</p>
+<div class="note" style="margin:0.4rem 0">$A_{tt}+A_{tv} = 1 - A_{t,\text{pad}} \approx 1$（实际偏差 $< 10^{-7}$，可视为等于 1）</div>
 
 <h3>派生比值</h3>
 <table>
