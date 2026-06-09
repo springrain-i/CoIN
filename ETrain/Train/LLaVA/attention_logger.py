@@ -1,21 +1,25 @@
 """
 AttentionLogger — records per-modality cross-attention statistics for LlamaAttention layers.
 
-Four attention-budget fractions per (step, layer).  For each query q and head h,
-we sum softmax weights over *all* keys of the target modality.  Because padding
-keys are masked to -inf before softmax, text keys + visual keys exhaust the full
-budget → A_tt + A_tv ≈ 1  and  A_vt + A_vv ≈ 1.
+Four attention-budget fractions per (step, layer).  Query positions are restricted to
+post-image text tokens (B-1 fix): text tokens that appear AFTER the last visual token,
+because only these can causally attend to visual keys.  Pre-image text tokens have
+A_tv = 0 by causal constraint and are excluded to avoid polluting the signal.
 
-  A_tt  mean fraction of text  query attention on text  keys  (≈ R_att_text)
-  A_tv  mean fraction of text  query attention on vis   keys  (high = text attends visual)
-  A_vt  mean fraction of vis   query attention on text  keys  (high = visual attends text)
+  A_tt  mean fraction of post-image text query attention on text  keys
+  A_tv  mean fraction of post-image text query attention on vis   keys  (key metric)
+  A_vt  mean fraction of vis   query attention on text  keys
   A_vv  mean fraction of vis   query attention on vis   keys
 
-Derived ratios (kept for explicitness; after normalization R_att_text ≈ A_tt):
+Aggregation across batch elements uses token-count-weighted average (B-2 fix):
+each post-image text query token contributes equally, regardless of how many
+such tokens a given batch element has.
+
+Derived ratios:
   R_att_text = A_tt / (A_tt + A_tv)
   R_att_vis  = A_vt / (A_vt + A_vv)
 
-Multi-GPU: each rank writes its own CSV; merge with merge_grad_csvs.py (same strategy).
+Multi-GPU: each rank writes its own CSV; merge with merge_grad_csvs.py.
 """
 import csv
 import math
@@ -124,54 +128,70 @@ class AttentionLogger:
             return
 
         bsz = attn_weights.shape[0]
-        A_tt_total = A_tv_total = A_vt_total = A_vv_total = 0.0
-        n_text_total = n_vis_total = 0
+
+        # B-2: weighted sums (weight = n_post_text per element)
+        A_tt_wsum = A_tv_wsum = 0.0
+        A_vt_wsum = A_vv_wsum = 0.0
+        n_post_text_total = 0   # total post-image text query tokens across batch
+        n_vis_total       = 0   # total visual query tokens across batch
         valid_b = 0
 
         with torch.no_grad():
             for b in range(bsz):
-                t_mask = (token_mask[b] == 2)   # [T]
-                v_mask = (token_mask[b] == 1)   # [T]
-                nt = int(t_mask.sum())
+                t_mask = (token_mask[b] == 2)   # [T]  all text positions
+                v_mask = (token_mask[b] == 1)   # [T]  all visual positions
                 nv = int(v_mask.sum())
 
-                if nt == 0 or nv == 0:
-                    continue   # skip pure-text or pure-visual batch elements
+                if nv == 0:
+                    continue   # skip pure-text elements
 
-                # attn_weights[b]: [H, T_q, T_k]
+                # B-1: restrict text queries to positions AFTER the last visual token.
+                # Pre-image text tokens have A_tv = 0 by causal masking (they cannot
+                # attend to future visual tokens), which would bias the mean toward 0
+                # regardless of model behaviour.
+                vis_positions = v_mask.nonzero(as_tuple=True)[0]
+                last_vis_pos  = int(vis_positions[-1])
+                post_img_t_mask = t_mask.clone()
+                post_img_t_mask[:last_vis_pos + 1] = False   # exclude pre-image text
+                n_post = int(post_img_t_mask.sum())
+
+                if n_post == 0:
+                    continue   # image is last token; no answer tokens to measure
+
                 w = attn_weights[b]  # [H, T_q, T_k]
 
-                # Text queries: rows where query position is text
-                # sum(-1): total attention budget to that modality per (head, query)
-                # A_tt + A_tv ≈ 1 because pad keys are -inf masked → 0 weight
-                w_tq = w[:, t_mask, :]                  # [H, T_t, T_k]
+                # Text queries: post-image positions only (B-1 fix).
+                # sum(-1) over key dimension; mean over (H, T_post) query positions.
+                # A_tt + A_tv: pad/future keys are masked to -inf, so only text+visual keys contribute.
+                w_tq = w[:, post_img_t_mask, :]          # [H, T_post, T_k]
                 A_tt = w_tq[:, :, t_mask].sum(-1).mean().item()
                 A_tv = w_tq[:, :, v_mask].sum(-1).mean().item()
 
-                # Visual queries (A_vt + A_vv ≈ 1 by same argument)
-                w_vq = w[:, v_mask, :]                  # [H, T_v, T_k]
+                # Visual queries: all visual positions (no causal ambiguity).
+                w_vq = w[:, v_mask, :]                   # [H, T_v, T_k]
                 A_vt = w_vq[:, :, t_mask].sum(-1).mean().item()
                 A_vv = w_vq[:, :, v_mask].sum(-1).mean().item()
 
-                A_tt_total += A_tt
-                A_tv_total += A_tv
-                A_vt_total += A_vt
-                A_vv_total += A_vv
-                n_text_total += nt
-                n_vis_total  += nv
+                # B-2: accumulate weighted by token count so each token contributes equally.
+                A_tt_wsum += A_tt * n_post
+                A_tv_wsum += A_tv * n_post
+                A_vt_wsum += A_vt * nv
+                A_vv_wsum += A_vv * nv
+                n_post_text_total += n_post
+                n_vis_total       += nv
                 valid_b += 1
 
-        if valid_b == 0:
+        if valid_b == 0 or n_post_text_total == 0:
             return
 
         self.records.append(_AttnStepRecord(
             step, layer_name,
-            A_tt_total / valid_b,
-            A_tv_total / valid_b,
-            A_vt_total / valid_b,
-            A_vv_total / valid_b,
-            n_text_total / valid_b,
-            n_vis_total  / valid_b,
+            A_tt_wsum / n_post_text_total,
+            A_tv_wsum / n_post_text_total,
+            A_vt_wsum / max(n_vis_total, 1),
+            A_vv_wsum / max(n_vis_total, 1),
+            n_post_text_total / valid_b,
+            n_vis_total       / valid_b,
         ))
 
     def save_csv(self, task_name: str) -> str:

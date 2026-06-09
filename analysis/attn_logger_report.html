@@ -354,6 +354,27 @@ bash scripts/LLaVA/Train_MOE/run_grad_t1_single.sh 1</div>
 </div>
 </div>
 
+<div class="section" id="b2-aggregation">
+  <h2>附录：B-2 批内聚合方式争议（供审阅）</h2>
+  <p style="color:var(--dim);font-size:.85rem">更新日期：2026-06-09 · 经 review_attn_logger.md 审稿意见触发</p>
+  <h3>问题描述</h3>
+  <p><code>_record()</code> 在同一 optimizer step 内统计一个 batch 的 A_tt / A_tv 时，需要把多个 batch element 的局部均值聚合为一个标量。存在两种方案：</p>
+  <table>
+    <thead><tr><th>方案</th><th>公式</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td><strong>等权均值</strong>（旧实现）</td><td><code>(A_tt_0+...+A_tt_{B-1})/B</code></td><td>每个样本等权；长答案与短答案样本贡献相同</td></tr>
+      <tr><td><strong>token 加权均值</strong>（当前实现）</td><td><code>(A_tt_0·n_0+...)/Σn_b</code></td><td>每个 post-image text token 等权</td></tr>
+    </tbody>
+  </table>
+  <h3>为什么选 token 加权均值</h3>
+  <p>当 element 0 只有 1 个答案 token，element 1 有 50 个时：等权均值把方差极大的 1-token 估计和稳定的 50-token 估计同等对待，引入不必要噪声。token 加权均值等价于在整个 batch 所有 post-image text query token 上直接求均值，是对"step 内平均 A_tv"最自然的无偏估计量。</p>
+  <h3>等权均值的合理性（反方论点）</h3>
+  <p>若分析单位是"每道题"而非"每个 token"，等权均值更合适，token 加权均值会让长答案样本主导。在 CoIN 多任务场景中，不同 task 答案长度差异大（SciQA 短、TextVQA 长），若 batch 内 task 分布不均，token 加权可能隐式偏向长答案任务。</p>
+  <h3>当前决定</h3>
+  <div class="note" style="border-color:var(--blue);background:rgba(88,166,255,.06)">
+    <strong>采用 token 加权均值</strong>（已实现，见 B-1+B-2 修复 commit）。分析单位是"答案 token 的注意力行为"，token 级等权符合该定义。若后续发现长/短样本行为差异显著，可输出 per-element A_tv 分布图加以对比。
+  </div>
+</div>
 <p style="color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center">
   CoIN · grad_attn 分支 · AttentionLogger · 2026-06-09
 </p>

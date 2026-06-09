@@ -156,8 +156,10 @@ This prevents text gradient from contaminating the visual compression subspace.
 After unimodal compression, non-text (visual) tokens attend to text tokens as keys/values. This injects task-description context into visual representations. Text tokens themselves are left unchanged.
 ```
 Att(A^v x^v, A^t x^t, A^t x^t) = softmax( (A^v x^v)(A^t x^t)^T / sqrt(r_per) ) · A^t x^t
-# Note: paper writes sqrt(N_t) but implementation uses sqrt(r_per) — standard scaled dot-product
-# attention scaling; sqrt(N_t) would vary with sequence length causing unstable softmax sharpness.
+# Scaling note: MoKA paper formula writes sqrt(N_t) (text token count); the original MoKA
+# repo code uses sqrt(r) (full lora rank, d_k of the projection); our MoEMoKA uses sqrt(r_per)
+# (= r/N, per-expert rank d_k). All are valid scaled dot-product attention; sqrt(N_t) varies
+# with sequence length causing unstable softmax sharpness, so we follow the code convention.
 Enhanced visual: A^v x^v + Att(...)
 ```
 No extra linear projections W_q/W_k/W_v — the A matrices already serve as projections.
