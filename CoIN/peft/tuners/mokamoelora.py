@@ -253,12 +253,14 @@ class MoEMoKALoraLinear(nn.Linear, MoEMoKALoraLayer):
         has_vis  = bool(vis_mask.any())
 
         # --- Router: per-token soft weights (B, S, N) -------------------------
-        dropped_x = self.lora_dropout[adapter](x)
+        # Router uses clean x for stable routing decisions; dropout is applied
+        # after routing to regularize only the expert computation path.
         router_weights = F.softmax(
-            self.lora_router[adapter](dropped_x), dim=-1
+            self.lora_router[adapter](x), dim=-1
         )   # (B, S, N)
 
         # --- Vectorized per-expert contribution ----------------------------------
+        dropped_x = self.lora_dropout[adapter](x)
         flat_text = dropped_x[text_mask]   # (n_text, d_in)
         flat_vis  = dropped_x[vis_mask]    # (n_vis,  d_in)
 
