@@ -553,10 +553,13 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             active = self.active_adapter
             x = x.to(self.lora_A[active].loraA[0].weight.dtype)
             lora_x, _ = self._apply_token_mask(x)
-            lora_x = self.lora_dropout[active](lora_x)
+            # Router uses clean lora_x (before dropout) for stable, semantically
+            # consistent routing decisions. Dropout is applied after routing,
+            # regularizing only the expert computation path.
             self.lora_router = self.lora_router.to(lora_x.device)
             router = self.lora_router[active](lora_x)
             router = torch.softmax(router, dim=-1)
+            lora_x = self.lora_dropout[active](lora_x)
 
             if getattr(self, 'use_vectorized_lora', True):
                 result = result + self._lora_vectorized(lora_x, router, active)
