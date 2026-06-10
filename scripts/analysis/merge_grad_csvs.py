@@ -160,10 +160,19 @@ def merge_task(task_name: str, rank_files: list[str], output_dir: str) -> None:
 
 
 def merge_task_attn(task_name: str, rank_files: list[str], output_dir: str) -> None:
-    """Merge per-rank attn_stats CSVs: average A values then recompute R."""
+    """Merge per-rank attn_stats CSVs: average values across ranks, recompute ratios.
+
+    Input columns (attn_stats.csv):
+      step, layer, A_tt, A_tv, R_att_text, U_vis, U_text, R_info, n_post_text
+    Output merged_attn_stats.csv:
+      step, layer, A_tt, A_tv, R_att_text, U_vis, U_text, R_info, n_post_text, n_ranks
+    Output merged_attn_summary.csv:
+      scope, layer, mean_A_tt, mean_A_tv, R_att_text, mean_U_vis, mean_U_text, R_info, n_steps
+    """
     agg: dict = defaultdict(lambda: {
-        "A_tt": [], "A_tv": [], "A_vt": [], "A_vv": [],
-        "n_text": [], "n_vis": [],
+        "A_tt": [], "A_tv": [],
+        "U_vis": [], "U_text": [],
+        "n_post_text": [],
     })
     for path in rank_files:
         for row in load_csv(path):
@@ -171,69 +180,72 @@ def merge_task_attn(task_name: str, rank_files: list[str], output_dir: str) -> N
             d = agg[key]
             d["A_tt"].append(float(row["A_tt"]))
             d["A_tv"].append(float(row["A_tv"]))
-            d["A_vt"].append(float(row["A_vt"]))
-            d["A_vv"].append(float(row["A_vv"]))
-            d["n_text"].append(int(row["n_text"]))
-            d["n_vis"].append(int(row["n_vis"]))
+            d["U_vis"].append(float(row["U_vis"]))
+            d["U_text"].append(float(row["U_text"]))
+            d["n_post_text"].append(float(row["n_post_text"]))
 
     os.makedirs(output_dir, exist_ok=True)
     stats_path = os.path.join(output_dir, f"{task_name}_merged_attn_stats.csv")
 
     layer_data: dict = defaultdict(lambda: {
-        "A_tt": [], "A_tv": [], "A_vt": [], "A_vv": [],
-        "n_text": [], "n_vis": [],
+        "A_tt": [], "A_tv": [],
+        "U_vis": [], "U_text": [],
     })
 
     with open(stats_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([
             "step", "layer",
-            "A_tt", "A_tv", "A_vt", "A_vv",
-            "R_att_text", "R_att_vis",
-            "n_text", "n_vis", "n_ranks",
+            "A_tt", "A_tv", "R_att_text",
+            "U_vis", "U_text", "R_info",
+            "n_post_text", "n_ranks",
         ])
         for (step, layer), d in sorted(agg.items()):
-            n_ranks = len(d["A_tt"])
-            A_tt  = statistics.mean(d["A_tt"]); A_tv = statistics.mean(d["A_tv"])
-            A_vt  = statistics.mean(d["A_vt"]); A_vv = statistics.mean(d["A_vv"])
-            nt = int(statistics.mean(d["n_text"])); nv = int(statistics.mean(d["n_vis"]))
-            R_att_text = A_tt / max(A_tt + A_tv, 1e-8)
-            R_att_vis  = A_vt / max(A_vt + A_vv, 1e-8)
+            n_ranks  = len(d["A_tt"])
+            A_tt     = statistics.mean(d["A_tt"]);  A_tv  = statistics.mean(d["A_tv"])
+            U_vis    = statistics.mean(d["U_vis"]); U_text = statistics.mean(d["U_text"])
+            n_post   = statistics.mean(d["n_post_text"])
+            R_att    = A_tt  / max(A_tt  + A_tv,   1e-8)
+            R_info   = U_vis / max(U_vis + U_text,  1e-8)
             w.writerow([
                 step, layer,
-                f"{A_tt:.6f}", f"{A_tv:.6f}", f"{A_vt:.6f}", f"{A_vv:.6f}",
-                f"{R_att_text:.4f}", f"{R_att_vis:.4f}",
-                nt, nv, n_ranks,
+                f"{A_tt:.6f}",  f"{A_tv:.6f}",  f"{R_att:.4f}",
+                f"{U_vis:.6f}", f"{U_text:.6f}", f"{R_info:.4f}",
+                f"{n_post:.1f}", n_ranks,
             ])
             ld = layer_data[layer]
-            ld["A_tt"].append(A_tt); ld["A_tv"].append(A_tv)
-            ld["A_vt"].append(A_vt); ld["A_vv"].append(A_vv)
-            ld["n_text"].append(nt); ld["n_vis"].append(nv)
+            ld["A_tt"].append(A_tt);   ld["A_tv"].append(A_tv)
+            ld["U_vis"].append(U_vis); ld["U_text"].append(U_text)
 
     summary_path = os.path.join(output_dir, f"{task_name}_merged_attn_summary.csv")
     with open(summary_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["scope", "layer", "mean_A_tt", "mean_A_tv", "mean_A_vt", "mean_A_vv",
-                    "R_att_text", "R_att_vis", "n_steps"])
-        all_tt, all_tv, all_vt, all_vv = [], [], [], []
+        w.writerow([
+            "scope", "layer",
+            "mean_A_tt", "mean_A_tv", "R_att_text",
+            "mean_U_vis", "mean_U_text", "R_info",
+            "n_steps",
+        ])
+        all_tt, all_tv, all_uv, all_ut = [], [], [], []
         for layer, ld in sorted(layer_data.items()):
-            n = len(ld["A_tt"])
-            A_tt = statistics.mean(ld["A_tt"]); A_tv = statistics.mean(ld["A_tv"])
-            A_vt = statistics.mean(ld["A_vt"]); A_vv = statistics.mean(ld["A_vv"])
+            n    = len(ld["A_tt"])
+            A_tt = statistics.mean(ld["A_tt"]);  A_tv  = statistics.mean(ld["A_tv"])
+            U_vis = statistics.mean(ld["U_vis"]); U_text = statistics.mean(ld["U_text"])
             w.writerow([
                 "layer", layer,
-                f"{A_tt:.6f}", f"{A_tv:.6f}", f"{A_vt:.6f}", f"{A_vv:.6f}",
-                f"{A_tt/max(A_tt+A_tv,1e-8):.4f}", f"{A_vt/max(A_vt+A_vv,1e-8):.4f}",
+                f"{A_tt:.6f}",  f"{A_tv:.6f}",  f"{A_tt/max(A_tt+A_tv,1e-8):.4f}",
+                f"{U_vis:.6f}", f"{U_text:.6f}", f"{U_vis/max(U_vis+U_text,1e-8):.4f}",
                 n,
             ])
-            all_tt.extend(ld["A_tt"]); all_tv.extend(ld["A_tv"])
-            all_vt.extend(ld["A_vt"]); all_vv.extend(ld["A_vv"])
-        g_tt = statistics.mean(all_tt); g_tv = statistics.mean(all_tv)
-        g_vt = statistics.mean(all_vt); g_vv = statistics.mean(all_vv)
+            all_tt.extend(ld["A_tt"]);  all_tv.extend(ld["A_tv"])
+            all_uv.extend(ld["U_vis"]); all_ut.extend(ld["U_text"])
+
+        g_tt  = statistics.mean(all_tt); g_tv  = statistics.mean(all_tv)
+        g_uv  = statistics.mean(all_uv); g_ut  = statistics.mean(all_ut)
         w.writerow([
             "global", "ALL",
-            f"{g_tt:.6f}", f"{g_tv:.6f}", f"{g_vt:.6f}", f"{g_vv:.6f}",
-            f"{g_tt/max(g_tt+g_tv,1e-8):.4f}", f"{g_vt/max(g_vt+g_vv,1e-8):.4f}",
+            f"{g_tt:.6f}",  f"{g_tv:.6f}",  f"{g_tt/max(g_tt+g_tv,1e-8):.4f}",
+            f"{g_uv:.6f}",  f"{g_ut:.6f}",  f"{g_uv/max(g_uv+g_ut,1e-8):.4f}",
             sum(len(ld["A_tt"]) for ld in layer_data.values()),
         ])
 
