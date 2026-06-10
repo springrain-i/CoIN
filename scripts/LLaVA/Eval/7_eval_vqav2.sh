@@ -4,6 +4,7 @@ gpu_list="${CUDA_VISIBLE_DEVICES:-0,1,2,5,6,7}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
 CHUNKS=${#GPULIST[@]}
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"  # VQAv2 has 214k samples; batch=8 gives ~8x speedup
 
 if [ ! -n "$1" ] ;then
     STAGE='Finetune'
@@ -46,6 +47,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --merge-lora False \
         --lora-mode $LORA_MODE \
         --max_new_tokens 50 \
+        --batch-size "${EVAL_BATCH_SIZE}" \
         --conv-mode vicuna_v1 &
 done
 

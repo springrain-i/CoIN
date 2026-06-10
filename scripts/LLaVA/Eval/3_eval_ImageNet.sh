@@ -30,6 +30,7 @@ gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
 CHUNKS=${#GPULIST[@]}
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"
 
 BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5'
 VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
@@ -49,6 +50,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --merge-lora False \
         --lora-mode $LORA_MODE \
         --max_new_tokens 20 \
+        --batch-size "${EVAL_BATCH_SIZE}" \
         --conv-mode vicuna_v1 &
 done
 # 三个选项: all, text, vision
