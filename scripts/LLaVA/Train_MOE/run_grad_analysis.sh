@@ -1,5 +1,8 @@
 #!/bin/bash
-# run_grad_analysis.sh — run MoELoRA T1→T8 with gradient logging (GPU 6,7 only)
+# run_grad_analysis.sh — run MoELoRA T1→T8 continual learning with grad + attn logging (GPU 6,7)
+#
+# Both gradient dominance stats and per-modality attention stats are logged.
+# COIN_USE_SDPA_PATCH=1 is required for attn logging (SDPA manually recomputes attn weights).
 #
 # Usage:
 #   bash scripts/LLaVA/Train_MOE/run_grad_analysis.sh [start_task] [end_task]
@@ -17,6 +20,7 @@ END_TASK=${2:-8}
 # ── GPU constraint: only 6,7 ─────────────────────────────────────────────────
 export CUDA_VISIBLE_DEVICES=6,7
 export COIN_DS_INCLUDE="localhost:0,1"   # DeepSpeed sees GPU 0,1 (mapped to physical 6,7)
+export COIN_USE_SDPA_PATCH=1             # required for attention logging
 
 # ── DeepSpeed CPUAdam env ─────────────────────────────────────────────────────
 export CUDA_HOME=${CUDA_HOME:-/data4/home/sqx/.conda/envs/coin}
@@ -29,8 +33,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/coin_paths.sh"
 
 GRAD_OUT_DIR="${COIN_REPO_ROOT}/analysis/gradient_dominance"
+ATTN_OUT_DIR="${COIN_REPO_ROOT}/analysis/attn_dominance"
 LOG_DIR="${COIN_REPO_ROOT}/logs/LLaVA/grad_analysis"
-mkdir -p "${GRAD_OUT_DIR}" "${LOG_DIR}"
+mkdir -p "${GRAD_OUT_DIR}" "${ATTN_OUT_DIR}" "${LOG_DIR}"
 
 # ── Task definitions ──────────────────────────────────────────────────────────
 TASK_NAMES=("" "ScienceQA" "TextVQA" "ImageNet" "GQA" "VizWiz" "Grounding" "VQAv2" "OCRVQA")
@@ -120,9 +125,11 @@ run_task() {
         --report_to none \
         ${prev_ckpt_arg} \
         --log_gradient_stats True \
-        --grad_task_name "T${k}_${task_name}" \
-        --grad_output_dir "${GRAD_OUT_DIR}" \
-        --grad_log_interval 1 \
+        --log_attn_stats      True \
+        --grad_task_name      "T${k}_${task_name}" \
+        --grad_output_dir     "${GRAD_OUT_DIR}" \
+        --attn_output_dir     "${ATTN_OUT_DIR}" \
+        --grad_log_interval   1 \
         2>&1 | tee "${log_file}"
 
     echo "[run_grad_analysis] Task ${k} done."

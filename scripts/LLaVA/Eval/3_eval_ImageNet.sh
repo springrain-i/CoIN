@@ -6,7 +6,7 @@ else
     STAGE=$1
 fi
 
-MODELPATH='/data4/home/sqx/CoIN/checkpoints/LLaVA/CoIN/GQA_llava_MOE_lora'
+MODELPATH='./checkpoints/LLaVA/CoIN/ImageNet_llava_MOE_lora'
 
 LORA_MODE='all'
 if [ -n "$2" ] ;then
@@ -25,8 +25,7 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
-export CUDA_VISIBLE_DEVICES=0,1,2,5,6,7
-gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
+gpu_list="${CUDA_VISIBLE_DEVICES:-0,1,2,5,6,7}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
 CHUNKS=${#GPULIST[@]}
