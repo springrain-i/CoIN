@@ -118,7 +118,7 @@ deepspeed --num_gpus 2 \
     --log_gradient_stats True \
     --grad_task_name "T${TASK}_${task_name}" \
     --grad_output_dir "${GRAD_OUT_DIR}" \
-    --grad_log_every 5 \
+    --grad_log_interval 5 \
     2>&1 | tee "${log_file}"
 
 echo "Task ${TASK} done. CSV: ${GRAD_OUT_DIR}/T${TASK}_${task_name}_grad_stats.csv"

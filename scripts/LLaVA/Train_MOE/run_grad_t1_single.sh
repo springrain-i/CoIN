@@ -15,6 +15,7 @@ TASK=${1:-1}
 
 export CUDA_VISIBLE_DEVICES=6
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+export COIN_USE_SDPA_PATCH=1   # required for --log_attn_stats (SDPA recomputes attn weights)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/coin_paths.sh"

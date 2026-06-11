@@ -122,7 +122,7 @@ run_task() {
         --log_gradient_stats True \
         --grad_task_name "T${k}_${task_name}" \
         --grad_output_dir "${GRAD_OUT_DIR}" \
-        --grad_log_every 1 \
+        --grad_log_interval 1 \
         2>&1 | tee "${log_file}"
 
     echo "[run_grad_analysis] Task ${k} done."
