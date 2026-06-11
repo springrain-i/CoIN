@@ -1,33 +1,32 @@
 # CoIN 项目说明
 
-本文件为 Claude Code 在此仓库工作时提供上下文和指导。
-
----
 
 ## 研究目标
 
 ### 核心研究问题
 
-MoKA（NeurIPS 2025）在**单任务多模态**设置下已证明能解决"过文本化"问题——标准 LoRA 的共享 A 矩阵因文本 token 梯度占优，导致视觉模态表征退化。
-
-**本项目的问题是：持续学习（8 任务顺序训练）会不会重新引入或加剧过文本化？**
-
-即使 MoKA 在单任务上有效，顺序学习更多文字密集型任务后，模态特定 A 矩阵仍可能向文本方向漂移。
+MokA（NeurIPS 2025）已在单任务多模态fine-tuning场景下证明，共享LoRA参数被优势模态token所主导，导致非优势模态信息利用不足。本实验旨在验证这一现象在MCIT场景下同样成立：在多模态持续学习的设定中，对每个任务单独微调时，LoRA参数是否依然系统性地对优势模态知识编码更充分，而非优势模态始终处于弱势？
 
 ### 实验设计
 
 | 模型 | 结构 | 角色 |
 |------|------|------|
-| **MoELoRA** | 共享 A 矩阵 + MoE 路由 | 基线（预期有文本偏置） |
-| **MoEMoKA** | 模态特定 A 矩阵 + MoE 路由 | 提出方法（预期减少文本偏置） |
+| **MoELoRA** | 每专家独立 (A_i, B_i)，无模态区分 + MoE 软路由 | 基线（预期有文本偏置） |
+| **MoEMoKA** | 每专家独立 (A_text_i, A_vis_i, B_i)，专家内跨模态注意力 + MoE 软路由 | 提出方法（预期减少文本偏置） |
 
 **测量过文本化的方式**：使用 `all` / `text` / `visual` 三种部分模态推理模式分别评估精度。若 `text` 精度 ≈ `all` 而 `visual` 精度显著低于 `all`，则说明过文本化严重。
 
 ### 三个阶段
 
-1. **在 CoIN 上跑 MoKA** — 实现并验证 MoKA 在 CoIN/LLaVA pipeline 8 个任务上能正确训练和评估。✅ 完成
-2. **构建 MoE-MoKA** — 每个专家持有各自的模态特定 `(A^text, A^visual)` 矩阵，加上 MoE 软路由。✅ 完成
-3. **分析持续学习中的过文本化** — 对比 MoELoRA 和 MoEMoKA 在 T8 checkpoint 下三种推理模式的精度差异。🔄 进行中
+1. **在 CoIN 上实现并验证 MoELoRA 和 MoEMoKA** — 完成两个模型在 CoIN/LLaVA pipeline 8 个任务上的训练与三模式 eval。✅ 完成
+
+2. **预实验：验证 MCIT 场景下模态不平衡遗忘的存在性** — 对比两模型在 T8 checkpoint 下 `all` / `text` / `visual` 三种推理模式的精度。✅ 完成，结论如下：
+   - visual-only 精度系统性低于 text-only 精度
+   - text-only 与 all 的差距远小于 visual-only 与 all 的差距
+   - 该规律在 8 个任务上普遍成立，与 MoKA 原始发现一致
+   - MoEMoKA 与 MoELoRA 呈现高度相似的三线分化模式（text ≈ all ≫ visual），说明单纯将参数替换为 MoKA 结构不能消除 MCIT 场景下视觉模态被系统性边缘化的问题
+
+3. **不平衡遗忘的成因分析** — 通过梯度和注意力分析，揭示 MCIT 下视觉模态持续边缘化的机制。🔄 进行中
 
 ---
 
@@ -38,11 +37,11 @@ MoKA（NeurIPS 2025）在**单任务多模态**设置下已证明能解决"过�
 | MoELoRA T8 continual training | ✅ 完成 | 检查点：`checkpoints/LLaVA/CoIN/` |
 | MoELoRA T8 全量 eval（8×3模式） | ✅ 完成 | 总耗时 35.5h，日志：`logs/LLaVA/CoIN/` |
 | MoEMoKA T8 continual training | ✅ 完成 | 检查点：`checkpoints/LLaVA/CoIN_MoEMoKA/OCRVQA_llava_MoEMoKA_lora` |
-| MoEMoKA T8 eval（all 模式） | 🔄 进行中 | T7_all 运行中，日志：`logs/LLaVA/MoEMoKA/` |
-| MoEMoKA T8 eval（text/visual 模式） | ⏳ 待跑 | 等 all 模式完成后开始 |
+| MoEMoKA T8 全量 eval（8×3模式） | ✅ 完成 | 日志：`logs/LLaVA/MoEMoKA/` |
+| 预实验：模态不平衡遗忘验证 | ✅ 完成 | 两模型均呈现 text ≈ all ≫ visual 三线分化 |
+| 成因分析（grad / attn） | 🔄 进行中 | — |
 
-**已有初步结果（T1-T6 all 模式）**：MoEMoKA 比 MoELoRA 平均快 **2.4×**，Grounding 任务最显著 **2.9×**。
-
+备注：MOEMOKA的T1~T7的实验在另一服务器进行，log请去对应恒源云查看
 ---
 
 ## 环境配置
@@ -70,41 +69,22 @@ export all_proxy=socks5://127.0.0.1:7891
 
 ---
 
-## 入口脚本
+## ⚠️ 训练 Batch Size 配置（启动前必须核对）
 
-### MoEMoKA（当前主要实验）
+**规则：每次启动训练脚本前，必须确认对应任务的 `per_device_train_batch_size` 已按下表设置。MoEMoKA 的 bs 为 MoELoRA 对应值的一半。**
 
-```bash
-# 持续训练（T1→T8 顺序）
-bash scripts/LLaVA/Train_MoEMoKA/run_coin_sequence.sh
+| # | 任务 | MoELoRA bs | MoEMoKA bs |
+|---|------|-----------|-----------|
+| 1 | ScienceQA | 512 | 256 |
+| 2 | TextVQA | 1024 | 512 |
+| 3 | ImageNet | 512 | 256 |
+| 4 | GQA | 384 | 192 |
+| 5 | VizWiz | 256 | 128 |
+| 6 | Grounding | 256 | 128 |
+| 7 | VQAv2 | 256 | 128 |
+| 8 | OCRVQA | 256 | 128 |
 
-# T8 eval（在 tmux coin 中运行）
-bash scripts/LLaVA/Train_MoEMoKA/run_evals_T8.sh <CKPT_DIR>
-
-# 等待 T8 训练完成后自动触发 eval
-bash scripts/LLaVA/Train_MoEMoKA/wait_and_eval_T8.sh
-```
-
-### MoELoRA（基线，已完成）
-
-```bash
-# 持续训练
-bash scripts/LLaVA/Train_MOE/run_coin_sequence.sh
-
-# 单任务基线
-bash scripts/LLaVA/Train_MOE/run_coin_single.sh
-```
-
-### 工具脚本
-
-```bash
-# GPU 运行时切换 watchdog（后台运行）
-bash scripts/watch_and_switch_gpus.sh <main_log_file>
-
-# Batch 推理修复验证
-COIN_USE_SDPA_PATCH=1 python scripts/test_batch_fix.py
-COIN_USE_SDPA_PATCH=1 python scripts/test_image_batch_fix.py
-```
+以上 bs 对 single-task 和 continual 训练均适用。
 
 ---
 
@@ -127,31 +107,9 @@ COIN_USE_SDPA_PATCH=1 python scripts/test_image_batch_fix.py
 
 ## 路径配置
 
-所有路径集中在对应的 `coin_paths.sh` 中，每个训练/eval 脚本都会 source 它。
+所有路径集中在 `scripts/LLaVA/Train_MoEMoKA/coin_paths.sh`（MoEMoKA）和 `scripts/LLaVA/Train_MOE/coin_paths.sh`（MoELoRA）中，每个训练/eval 脚本都会 source 它。**换服务器时只需修改对应 `coin_paths.sh`，不要在此处记录具体路径。**
 
-### 公共路径
-
-| 变量 | 默认值 |
-|------|--------|
-| `COIN_BASE_MODEL` | `/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5` |
-| `COIN_VISION_TOWER` | `/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336` |
-| `COIN_INSTR_ROOT` | `/data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original` |
-| `COIN_IMAGE_ROOT` | `/data4/wxl/MoBLoRA-backup/CoIN/cl_dataset` |
-
-### 检查点路径
-
-| 实验 | 路径 |
-|------|------|
-| MoEMoKA T8（OCRVQA，最终） | `checkpoints/LLaVA/CoIN_MoEMoKA/OCRVQA_llava_MoEMoKA_lora` |
-| MoEMoKA T7（VQAv2） | `checkpoints/LLaVA/CoIN_MoEMoKA/VQAv2_llava_MoEMoKA_lora` |
-| MoELoRA T8 | `checkpoints/LLaVA/CoIN/`（各任务子目录） |
-
-### 日志路径
-
-| 实验 | 路径 |
-|------|------|
-| MoEMoKA eval | `logs/LLaVA/MoEMoKA/T8_eval_T{N}_{mode}.log` |
-| MoELoRA eval | `logs/LLaVA/CoIN/eval_online_trainT8_evalT{N}_{mode}_*.log` |
+关键变量：`COIN_BASE_MODEL`、`COIN_VISION_TOWER`、`COIN_INSTR_ROOT`、`COIN_IMAGE_ROOT`、`COIN_OUTPUT_ROOT`
 
 ### 结果路径
 
@@ -169,7 +127,7 @@ results/CoIN/LLaVA/
 ### 包结构
 
 - **`ETrain/`** — 主训练/评估框架
-  - `Train/LLaVA/train.py` — 训练入口；`ModelArguments` 含 `expert_num`、`task_embedding_dim`、`lora_enable`、`moka_enable`
+  - `Train/LLaVA/train.py` — 训练入口；`ModelArguments` 含 `expert_num`、`task_embedding_dim`、`lora_enable`、`moe_moka_enable`
   - `Train/LLaVA/train_mem.py` — 薄封装，monkey-patch flash attention 后调用 `train.py`
   - `Train/LLaVA/llama_sdpa_monkey_patch.py` — 用 `F.scaled_dot_product_attention` 替代 flash_attn；含 NaN 修复（见下方）
   - `Models/LLaVA/llava_arch.py` — 多模态模型 mixin；`prepare_inputs_labels_for_multimodal()` 构建交错的文本+视觉 embedding，并赋值 `current_lora_mask`
@@ -179,7 +137,7 @@ results/CoIN/LLaVA/
 - **`CoIN/peft/tuners/`** — 自定义 PEFT（fork 自 `peft==0.4.0`）
   - `lora.py` — 标准 LoRA 扩展了 `token_mask` 和 `lora_mode`
   - `coinmoelora.py` — MoE-LoRA：`CoINMOELoraConfig`，软路由（softmax 加权求和）
-  - `mokamoelora.py` — **MoE-MoKA**：每个专家持有 `(lora_A_text_i, lora_A_visual_i)`，共享 `lora_B`；含跨模态注意力模块
+  - `mokamoelora.py` — **MoE-MoKA**：每个专家持有 `(lora_A_text_i, lora_A_vis_i, lora_B_i)`；含跨模态注意力模块
 
 ### 部分模态掩码（lora_mode）
 
@@ -206,107 +164,68 @@ Token mask 编码（在 `llava_arch.py` 中赋值）：
 
 ---
 
-## Batch 推理修复（勿破坏）
+## 成因分析工具（`grad_attn` 分支）
 
-`COIN_EVAL_BATCH_SIZE=4` 加速 eval，但曾有三个分层 bug 导致精度从 62% 降至 28%。**以下修复已全部应用，不可回退。**
+分析代码在独立分支 `grad_attn`，worktree 挂载在 `.worktrees/grad/`。
 
-### Bug 1：混合 batch 图像处理（`model_vqa_science.py`）
+### 核心文件
 
-`prepare_inputs_labels_for_multimodal` 对每个 sample 都会递增 `cur_image_idx`，包括纯文本 sample。混合 batch 必须为纯文本 slot 提供 dummy 零图像：
+| 文件 | 作用 |
+|------|------|
+| `ETrain/Train/LLaVA/gradient_logger.py` | `ModalGradientLogger`：逐层记录文本/视觉梯度范数及比值 |
+| `ETrain/Train/LLaVA/attention_logger.py` | `AttentionLogger`：记录 post-image text token 对 text/vis key 的注意力分布及信息流 |
+| `ETrain/Train/LLaVA/train_grad.py` | 训练入口，注入两个 logger；需 `COIN_USE_SDPA_PATCH=1` |
+| `scripts/LLaVA/Train_MOE/run_grad_analysis.sh` | MoELoRA T1→T8 全流程（GPU 6,7）带 grad+attn 日志 |
+| `scripts/analysis/merge_grad_csvs.py` | 合并多卡 CSV |
+| `scripts/analysis/plot_coin_metrics.py` | 绘图 |
 
-```python
-ref_img = next(s["image_tensor"] for s in samples if s["image_tensor"] is not None)
-images = torch.stack([
-    s["image_tensor"] if s["image_tensor"] is not None
-    else torch.zeros_like(ref_img)
-    for s in samples
-])
+### 关键指标
+
+**梯度主导度**（`gradient_logger.py`）：
+- `R_A`、`R_B`、`R_dW`：文本/视觉梯度 Frobenius 范数比（> 1 = 文本主导）
+- `R_*_tok`：按 token 数归一化后的比值（剔除 token 数量差异）
+
+**注意力分布**（`attention_logger.py`）：
+- `A_tv`：post-image text query 对 visual key 的注意力比例（核心指标）
+- `U_vis`、`U_text`：信息流范数（Wu et al., CoLM 2025）
+- `R_info = U_vis / (U_vis + U_text)`：视觉信息流占比
+
+### 输出路径
+
+```
+analysis/gradient_dominance/   # 梯度 CSV（每任务每层）
+analysis/attn_dominance/       # 注意力 CSV（每任务每层）
+logs/LLaVA/grad_analysis/      # 训练日志
 ```
 
-HF `generate()` 返回 `output_ids` shape 为 `[B, original_input_ids_len + new_tokens]`，解码 offset 始终为 `input_ids.shape[1]`。
-
-### Bug 2：tokenizer_padding_side 未传递给 model.config
-
-`prepare_inputs_labels_for_multimodal` 读取 `model.config.tokenizer_padding_side` 决定图像展开后的 padding 方向。batch_size > 1 时必须设置：
-
-```python
-model.config.tokenizer_padding_side = "left"
-```
-
-已在所有 eval 脚本中设置（`model_vqa_science.py`、`model_vqa.py`、`model_text_vqa.py` 等）。
-
-### Bug 3：SDPA monkey patch 中左 padding 的 NaN 传播
-
-padding query position 的 attention row 全为 -inf → softmax → NaN → 通过残差连接传播。修复：在 `ETrain/Train/LLaVA/llama_sdpa_monkey_patch.py` 的 SDPA 调用后，将 padding query position 的输出置零：
-
-```python
-if attention_mask is not None and not is_decode:
-    q_pad = (attention_mask[:, :q_len] == 0)
-    attn_output = attn_output.masked_fill(q_pad[:, None, :, None], 0.0)
-```
-
-**eval 时必须设置 `COIN_USE_SDPA_PATCH=1`**（在 `eval_common.sh` 中已设置）。
-
----
-
-## GPU 运行时切换机制
-
-eval 过程中可以不重启进程切换 GPU：
+### 运行入口
 
 ```bash
-# 写入 override 文件（立即生效于下一个任务）
-echo "0,1,2,3" > /tmp/coin_gpu_override
-
-# 或使用 watchdog 脚本自动切换（在后台运行）
-bash scripts/watch_and_switch_gpus.sh <main_log_file> &
+# 需先切换到 grad_attn 分支或进入 .worktrees/grad/
+COIN_USE_SDPA_PATCH=1 bash scripts/LLaVA/Train_MOE/run_grad_analysis.sh 1 8
 ```
-
-`eval_common.sh` 在每个任务开始时读取 `/tmp/coin_gpu_override`，若存在则覆盖 `CUDA_VISIBLE_DEVICES`。
 
 ---
 
-## MoKA 原理（NeurIPS 2025）
+## Batch 推理修复（勿破坏）
 
-论文：`/data4/home/sqx/MokA/Wei 等 - MokA Multimodal Low-Rank Adaptation for MLLMs.pdf`
+`COIN_EVAL_BATCH_SIZE=4` 已修复三个分层 bug（精度曾从 62% 降至 28%），**修复已全部应用，不可回退**。详见 [`docs/batch_inference_fix.md`](docs/batch_inference_fix.md)。
 
-### 过文本化问题
+eval 时必须设置 `COIN_USE_SDPA_PATCH=1`（`eval_common.sh` 中已设置）。
 
-标准 LoRA 的单一共享 A 矩阵因文本 token 梯度更强，导致 A 被过度优化为文本方向。部分模态推理时，`text-only` 精度接近 `all`，但 `vision-only` 精度显著下降。
+---
 
-### MoKA 架构
+## 参考文档
 
-用三个组件替换单一 A 矩阵，保持 B 共享：
-
-1. **模态特定 A 矩阵**：`A^text` 和 `A^visual` 各自独立，防止文本梯度污染视觉压缩子空间
-2. **任务中心跨注意力**：视觉 token 以文本 token 为 K/V 进行注意力，注入任务描述上下文
-3. **共享多模态 B**：将增强后的单模态表征投影到输出空间
-
-```
-h = W_0·x + B·[A^t·x^t  ;  A^v·x^v + Att(A^v·x^v, A^t·x^t, A^t·x^t)]
-```
-
-### MoE-MoKA 扩展
-
-N 个专家各持有 `(A^text_i, A^visual_i)`，共享 B，软路由：
-
-```
-ΔW·x = B · Σ_i  w_i · [A^text_i·x^text ;  A^visual_i·x^visual + Att_i(...)]
-```
-
-实现文件：`CoIN/peft/tuners/mokamoelora.py`
+- MoKA 论文：`/data4/home/sqx/MokA/Wei 等 - MokA Multimodal Low-Rank Adaptation for MLLMs.pdf`
+- MoE-MoKA 实现说明：[`docs/MoEMoKA_Implementation.md`](docs/MoEMoKA_Implementation.md)
+- Batch 推理修复：[`docs/batch_inference_fix.md`](docs/batch_inference_fix.md)
 
 ---
 
 ## 安装
 
-```bash
-conda create -n coin python=3.10 -y
-conda activate coin
-pip install --upgrade pip
-pip install -e .
-pip install -e ".[train]"
-pip install flash-attn --no-build-isolation
-```
+见 `README.md` 安装章节（conda env `coin`，Python 3.10，需 flash-attn）。
 
 ---
 
