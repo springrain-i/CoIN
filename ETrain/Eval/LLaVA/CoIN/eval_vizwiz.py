@@ -25,6 +25,7 @@ def eval_single(annotation_file, result_file):
         annotation = annotations[result['question_id']]
         pred = result['text']
         pred = pred[1:] if len(pred) > 0 and pred[0] == ' ' else pred
+        pred = pred.strip().rstrip('.,!?;:')
         ground_truth = annotation['answer']
         if pred.upper() == ground_truth.upper():
             right += 1
