@@ -12,31 +12,40 @@ resolve_first_existing_path() {
       return
     fi
   done
-  # Keep behavior predictable even when nothing exists yet.
   echo "$1"
 }
 
 DEFAULT_BASE_MODEL="$(resolve_first_existing_path \
+  /hy-tmp/Vicuna/vicuna-7b-v1.5 \
+  /hy-tmp/Vicuna \
   /data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-7b-v1.5)"
 
 DEFAULT_VISION_TOWER="$(resolve_first_existing_path \
+  /hy-tmp/clip-vit-large-patch14-336 \
   /data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336)"
 
 DEFAULT_PRETRAIN_PROJECTOR="$(resolve_first_existing_path \
+  /hy-tmp/llava_projectors/llava-v1.5-mlp2x-336px-pretrain-vicuna-7b-v1.5/mm_projector.bin \
   /data4/wxl/MoBLoRA-backup/CoIN/llava_projectors/llava-v1.5-mlp2x-336px-pretrain-vicuna-7b-v1.5/mm_projector.bin)"
 
-# Core paths (override via env when needed)
-COIN_DS_CONFIG="${COIN_DS_CONFIG:-${COIN_REPO_ROOT}/scripts/zero3_offload.json}"
+DEFAULT_INSTR_ROOT="$(resolve_first_existing_path \
+  /hy-tmp/playground/Instructions_Original \
+  /data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original)"
+
+DEFAULT_IMAGE_ROOT="$(resolve_first_existing_path \
+  /hy-tmp \
+  /data4/wxl/MoBLoRA-backup/CoIN/cl_dataset)"
+
+# Core paths. Override any of these via environment when needed.
+COIN_DS_CONFIG="${COIN_DS_CONFIG:-${COIN_REPO_ROOT}/scripts/zero2.json}"
 COIN_BASE_MODEL="${COIN_BASE_MODEL:-${DEFAULT_BASE_MODEL}}"
 COIN_VISION_TOWER="${COIN_VISION_TOWER:-${DEFAULT_VISION_TOWER}}"
 COIN_PRETRAIN_PROJECTOR="${COIN_PRETRAIN_PROJECTOR:-${DEFAULT_PRETRAIN_PROJECTOR}}"
-# On 3090 server, instruction jsons and image data are stored separately.
-COIN_INSTR_ROOT="${COIN_INSTR_ROOT:-/data4/wxl/MoBLoRA-backup/CoIN/playground/Instructions_Original}"
-COIN_IMAGE_ROOT="${COIN_IMAGE_ROOT:-/data4/wxl/MoBLoRA-backup/CoIN/cl_dataset}"
-COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-${COIN_REPO_ROOT}/checkpoints/LLaVA/CoIN}"
+COIN_INSTR_ROOT="${COIN_INSTR_ROOT:-${DEFAULT_INSTR_ROOT}}"
+COIN_IMAGE_ROOT="${COIN_IMAGE_ROOT:-${DEFAULT_IMAGE_ROOT}}"
+COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-/hy-tmp/CoIN/checkpoints/LLaVA/CoIN}"
 
 build_ds_include() {
-  # If user provides explicit include, respect it.
   if [[ -n "${COIN_DS_INCLUDE:-}" ]]; then
     echo "${COIN_DS_INCLUDE}"
     return

@@ -175,9 +175,10 @@ Token mask 编码（在 `llava_arch.py` 中赋值）：
 | `ETrain/Train/LLaVA/gradient_logger.py` | `ModalGradientLogger`：逐层记录文本/视觉梯度范数及比值 |
 | `ETrain/Train/LLaVA/attention_logger.py` | `AttentionLogger`：记录 post-image text token 对 text/vis key 的注意力分布及信息流 |
 | `ETrain/Train/LLaVA/train_grad.py` | 训练入口，注入两个 logger；需 `COIN_USE_SDPA_PATCH=1` |
-| `scripts/LLaVA/Train_MOE/run_grad_analysis.sh` | MoELoRA T1→T8 全流程（GPU 6,7）带 grad+attn 日志 |
+| `scripts/LLaVA/Train_MOE/run_grad_attn_analysis.sh` | MoELoRA T1→T8 单卡全流程，带 grad+attn 日志 |
 | `scripts/analysis/merge_grad_csvs.py` | 合并多卡 CSV |
 | `scripts/analysis/plot_coin_metrics.py` | 绘图 |
+Grad/attn logging policy: [`docs/grad_attn_logging_policy.md`](docs/grad_attn_logging_policy.md). CLAUDE.md keeps only this index; the policy file is the source of truth.
 
 ### 关键指标
 
@@ -195,14 +196,14 @@ Token mask 编码（在 `llava_arch.py` 中赋值）：
 ```
 analysis/gradient_dominance/   # 梯度 CSV（每任务每层）
 analysis/attn_dominance/       # 注意力 CSV（每任务每层）
-logs/LLaVA/grad_analysis/      # 训练日志
+logs/LLaVA/grad_attn_analysis/      # 训练日志
 ```
 
 ### 运行入口
 
 ```bash
 # 需先切换到 grad_attn 分支或进入 .worktrees/grad/
-COIN_USE_SDPA_PATCH=1 bash scripts/LLaVA/Train_MOE/run_grad_analysis.sh 1 8
+COIN_USE_SDPA_PATCH=1 bash scripts/LLaVA/Train_MOE/run_grad_attn_analysis.sh 1 8
 ```
 
 ---

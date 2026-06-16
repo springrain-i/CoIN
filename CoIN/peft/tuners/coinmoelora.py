@@ -408,7 +408,12 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
         A = torch.stack([m.mlp.weight for m in self.lora_A[active].loraA], dim=0)  # (N, r_per, d_in)
         B = torch.stack([m.mlp.weight for m in self.lora_B[active].loraB], dim=0)  # (N, d_out, r_per)
 
-        if getattr(self, '_log_gradients', False):
+        logger_ref = getattr(self, '_grad_logger', None)
+        layer_name = getattr(self, '_grad_layer_name', '')
+        if (getattr(self, '_log_gradients', False)
+                and torch.is_grad_enabled()
+                and logger_ref is not None
+                and logger_ref.should_log_record(layer_name)):
             # Three gradient metrics recorded per logged step (all EXACT):
             #   W_A:  G^t_A[n,r,d] = Σ_{b,t∈text} g_out_A[b,t,n,r] * lora_x[b,t,d]
             #         shape (N,r,d_in) — materialised, tiny
@@ -420,14 +425,16 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             # Backward order: hook_lora_out → hook_B → hook_A (flushes all)
             # x_ref freed in hook_A; out_A_ref freed in hook_B.
             raw_mask   = self.token_mask
-            logger_ref = getattr(self, '_grad_logger', None)
-            layer_name = getattr(self, '_grad_layer_name', '')
-            step       = logger_ref.step if logger_ref is not None else 0
-            log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
+            step       = logger_ref.current_step
 
             A_shape, A_dtype, A_device = A.shape, A.dtype, A.device
-            # B shape for G_B zero tensor: (N, d_out, r_per) — infer from B itself
-            B_shape = B.shape  # (N, d_out, r_per)
+            # B shape for G_B zero tensor: (N, d_out, r_per); infer from B itself
+            B_shape, B_dtype = B.shape, B.dtype  # (N, d_out, r_per)
+
+            def _stat_tensor(tensor, dtype):
+                # Match the MoE-LoRA parameter dtype for observational stats only;
+                # hooks do not return gradients and do not alter the training path.
+                return tensor if tensor.dtype == dtype else tensor.to(dtype)
 
             out_A = torch.einsum('bti,nri->btnr', lora_x, A)  # (B,T,N,r_per)
             out_B = torch.einsum('btnr,nor->btno', out_A, B)   # (B,T,N,d_out)
@@ -439,7 +446,7 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             # G^t shape (d_out, d_in) = (4096, 4096) ≈ 33MB bf16 — acceptable on 8×24GB
             def hook_lora_out(g_lora_out):
                 # g_lora_out: (B, T, d_out)
-                if logger_ref is None or step % log_every != 0:
+                if logger_ref is None:
                     return
                 x_cap = x_ref[0]  # still alive; hook_A frees it later
                 d_out, d_in = B_shape[1], A_shape[2]
@@ -454,9 +461,9 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                         n_vis_total  += int(v_idx.sum())
                         if t_idx.any():
                             # (d_out, T_t) @ (T_t, d_in) → (d_out, d_in)
-                            G_t += g_lora_out[b, t_idx].T @ x_cap[b, t_idx]
+                            G_t += _stat_tensor(g_lora_out[b, t_idx], A_dtype).T @ _stat_tensor(x_cap[b, t_idx], A_dtype)
                         if v_idx.any():
-                            G_v += g_lora_out[b, v_idx].T @ x_cap[b, v_idx]
+                            G_v += _stat_tensor(g_lora_out[b, v_idx], A_dtype).T @ _stat_tensor(x_cap[b, v_idx], A_dtype)
                     logger_ref._pending_dw[(step, layer_name)] = {
                         'g_tdW':  G_t.norm().item(),
                         'g_vdW':  G_v.norm().item(),
@@ -473,21 +480,21 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 # g_out_B: (B,T,N,d_out)
                 out_A_cap    = out_A_ref[0]
                 out_A_ref[0] = None   # release
-                if logger_ref is None or step % log_every != 0:
+                if logger_ref is None:
                     return
                 with torch.no_grad():
-                    G_t_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
-                    G_v_B = torch.zeros(B_shape, dtype=A_dtype, device=A_device)
+                    G_t_B = torch.zeros(B_shape, dtype=B_dtype, device=A_device)
+                    G_v_B = torch.zeros(B_shape, dtype=B_dtype, device=A_device)
                     for b in range(raw_mask.shape[0]):
                         t_idx = (raw_mask[b] == 2)
                         v_idx = (raw_mask[b] == 1)
                         if t_idx.any():
                             # einsum: (T_t,N,d_out) × (T_t,N,r) → (N,d_out,r)
                             G_t_B += torch.einsum(
-                                'tnd,tnr->ndr', g_out_B[b, t_idx], out_A_cap[b, t_idx])
+                                'tnd,tnr->ndr', _stat_tensor(g_out_B[b, t_idx], B_dtype), _stat_tensor(out_A_cap[b, t_idx], B_dtype))
                         if v_idx.any():
                             G_v_B += torch.einsum(
-                                'tnd,tnr->ndr', g_out_B[b, v_idx], out_A_cap[b, v_idx])
+                                'tnd,tnr->ndr', _stat_tensor(g_out_B[b, v_idx], B_dtype), _stat_tensor(out_A_cap[b, v_idx], B_dtype))
                     logger_ref._pending[(step, layer_name)] = {
                         'g_tB': G_t_B.norm().item(),
                         'g_vB': G_v_B.norm().item(),
@@ -499,7 +506,7 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 # g_out_A: (B, T, N, r_per)
                 x_cap = x_ref[0]
                 x_ref[0] = None  # release — all hooks that need x have already fired
-                if logger_ref is None or step % log_every != 0:
+                if logger_ref is None:
                     return
                 with torch.no_grad():
                     G_t = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
@@ -509,10 +516,10 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                         v_idx = (raw_mask[b] == 1)
                         if t_idx.any():
                             G_t += torch.einsum(
-                                'tnr,td->nrd', g_out_A[b, t_idx], x_cap[b, t_idx])
+                                'tnr,td->nrd', _stat_tensor(g_out_A[b, t_idx], A_dtype), _stat_tensor(x_cap[b, t_idx], A_dtype))
                         if v_idx.any():
                             G_v += torch.einsum(
-                                'tnr,td->nrd', g_out_A[b, v_idx], x_cap[b, v_idx])
+                                'tnr,td->nrd', _stat_tensor(g_out_A[b, v_idx], A_dtype), _stat_tensor(x_cap[b, v_idx], A_dtype))
 
                     entry_B  = logger_ref._pending.pop((step, layer_name), {})
                     entry_dW = logger_ref._pending_dw.pop((step, layer_name), {})

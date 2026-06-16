@@ -45,6 +45,13 @@ _task_name     = _pop_arg(_argv, "--grad_task_name",     "task_unknown")
 _grad_out_dir  = _pop_arg(_argv, "--grad_output_dir",    "analysis/gradient_dominance")
 _attn_out_dir  = _pop_arg(_argv, "--attn_output_dir",    "analysis/attn_dominance")
 _log_every     = int(_pop_arg(_argv, "--grad_log_interval", "1"))
+_grad_total_steps = _pop_arg(_argv, "--grad_total_steps", None)
+_grad_total_steps = int(_grad_total_steps) if _grad_total_steps not in (None, "") else None
+_grad_step_schedule = _pop_arg(_argv, "--grad_step_schedule", "interval")
+_grad_layer_blocks = _pop_arg(_argv, "--grad_layer_blocks", None)
+_grad_accum_steps = _pop_arg(_argv, "--grad_accum_steps", None)
+_grad_accum_steps = int(_grad_accum_steps) if _grad_accum_steps not in (None, "") else None
+_grad_microbatch_sample = _pop_arg(_argv, "--grad_microbatch_sample", "0.25")
 sys.argv[1:]   = _argv
 
 
@@ -72,6 +79,12 @@ if _log_grad:
     _grad_logger = ModalGradientLogger(
         log_every_n_steps=_log_every,
         output_dir=_grad_out_dir,
+        total_optimizer_steps=_grad_total_steps,
+        step_schedule=_grad_step_schedule,
+        layer_blocks=_grad_layer_blocks,
+        grad_accum_steps=_grad_accum_steps,
+        microbatch_sample=_grad_microbatch_sample,
+        task_name=_task_name,
     )
 
 if _log_attn:
@@ -79,6 +92,12 @@ if _log_attn:
     _attn_logger = AttentionLogger(
         log_every_n_steps=_log_every,
         output_dir=_attn_out_dir,
+        task_name=_task_name,
+        total_optimizer_steps=_grad_total_steps,
+        step_schedule=_grad_step_schedule,
+        layer_blocks=_grad_layer_blocks,
+        grad_accum_steps=_grad_accum_steps,
+        microbatch_sample=_grad_microbatch_sample,
     )
 
 
@@ -125,7 +144,9 @@ if _log_grad or _log_attn:
 
     _llava_trainer_mod.LLaVATrainer.__init__ = _patched_init
     print(f"[train_grad] patched LLaVATrainer — task={_task_name}, "
-          f"log_every={_log_every}, grad={_log_grad}, attn={_log_attn}")
+          f"log_every={_log_every}, grad={_log_grad}, attn={_log_attn}, "
+          f"schedule={_grad_step_schedule}, blocks={_grad_layer_blocks}, "
+          f"accum={_grad_accum_steps}, microbatch_sample={_grad_microbatch_sample}")
 
 
 # ── run training ──────────────────────────────────────────────────────────────

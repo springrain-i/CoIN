@@ -37,17 +37,18 @@ import math
 import os
 import statistics
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, TextIO, Tuple
 
 import torch
 import torch.nn as nn
 
 
 class _AttnStepRecord:
-    __slots__ = ("step", "layer", "A_tt", "A_tv", "U_vis", "U_text", "n_post_text")
+    __slots__ = ("step", "microbatch", "layer", "A_tt", "A_tv", "U_vis", "U_text", "n_post_text")
 
-    def __init__(self, step, layer, A_tt, A_tv, U_vis, U_text, n_post_text):
+    def __init__(self, step, microbatch, layer, A_tt, A_tv, U_vis, U_text, n_post_text):
         self.step        = step
+        self.microbatch  = microbatch
         self.layer       = layer
         self.A_tt        = A_tt
         self.A_tv        = A_tv
@@ -78,12 +79,210 @@ class AttentionLogger:
         self,
         log_every_n_steps: int = 1,
         output_dir: str = "analysis/attn_dominance",
+        task_name: str = "task_unknown",
+        total_optimizer_steps: Optional[int] = None,
+        step_schedule: str = "interval",
+        layer_blocks: Optional[str] = None,
+        grad_accum_steps: Optional[int] = None,
+        microbatch_sample: Optional[str] = "0.25",
     ):
-        self.log_every_n_steps = log_every_n_steps
+        self.log_every_n_steps = max(int(log_every_n_steps), 1)
         self.output_dir = output_dir
+        self.task_name = task_name
         self.step: int = 0
+        self.total_optimizer_steps = total_optimizer_steps
+        self.step_schedule = step_schedule
+        self.selected_steps = self._build_step_schedule(total_optimizer_steps, step_schedule)
+        self.layer_blocks = self._parse_layer_blocks(layer_blocks)
+        self.grad_accum_steps = int(grad_accum_steps) if grad_accum_steps not in (None, "") else None
+        self.microbatch_sample = microbatch_sample
+        self.selected_microbatches = self._build_microbatch_schedule(
+            self.grad_accum_steps, microbatch_sample)
         self.records: List[_AttnStepRecord] = []
         self._enabled = False
+        self._stream_file: Optional[TextIO] = None
+        self._stream_writer = None
+        self._stream_path: Optional[str] = None
+        self._microbatch_anchor_layer: Optional[str] = None
+        self._active_step: Optional[int] = None
+        self._microbatch_index = 0
+        self._current_microbatch_selected = True
+        self._record_calls = 0
+        self._record_written = 0
+        self._skip_no_visual = 0
+        self._skip_no_post_text = 0
+
+    @property
+    def current_step(self) -> int:
+        return self.step + 1
+
+    @staticmethod
+    def _rank() -> int:
+        try:
+            import torch.distributed as dist
+            return dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
+        except Exception:
+            return 0
+
+    def _stats_path(self) -> str:
+        rank = self._rank()
+        return os.path.join(self.output_dir, f"{self.task_name}_rank{rank}_attn_stats.csv")
+
+    @staticmethod
+    def _parse_layer_blocks(layer_blocks: Optional[str]) -> Optional[Set[int]]:
+        if layer_blocks is None or str(layer_blocks).strip() == "":
+            return None
+        blocks: Set[int] = set()
+        for item in str(layer_blocks).split(','):
+            item = item.strip()
+            if item:
+                blocks.add(int(item))
+        return blocks
+
+    @staticmethod
+    def _block_id(layer_name: str) -> Optional[int]:
+        import re
+        match = re.search(r'(?:^|\.)layers\.(\d+)(?:\.|$)', layer_name)
+        return int(match.group(1)) if match else None
+
+    def should_log_layer(self, layer_name: str) -> bool:
+        if self.layer_blocks is None:
+            return True
+        block = self._block_id(layer_name)
+        return block in self.layer_blocks
+
+    @staticmethod
+    def _spread_points(start: int, end: int, count: int) -> List[int]:
+        if count <= 0 or end < start:
+            return []
+        if count == 1:
+            return [start]
+        return [round(start + i * (end - start) / (count - 1)) for i in range(count)]
+
+    @classmethod
+    def _build_step_schedule(cls, total_steps: Optional[int], schedule: str) -> Optional[Set[int]]:
+        if schedule != "staged" or total_steps is None or total_steps <= 0:
+            return None
+        total_steps = int(total_steps)
+        if total_steps <= 50:
+            return set(range(1, total_steps + 1))
+        if total_steps <= 100:
+            ratio = 0.30
+        elif total_steps <= 200:
+            ratio = 0.20
+        elif total_steps <= 600:
+            ratio = 0.10
+        else:
+            ratio = 0.08
+        target = max(1, round(total_steps * ratio))
+        front_end = max(1, math.ceil(total_steps * 0.20))
+        mid_end = max(front_end, math.ceil(total_steps * 0.60))
+        front_n = math.ceil(target * 0.50)
+        mid_n = math.ceil(target * 0.30)
+        late_n = max(0, target - front_n - mid_n)
+        points = set(cls._spread_points(1, front_end, front_n))
+        points.update(cls._spread_points(front_end + 1, mid_end, mid_n))
+        points.update(cls._spread_points(mid_end + 1, total_steps, late_n))
+        for step in range(1, total_steps + 1):
+            if len(points) >= target:
+                break
+            points.add(step)
+        return {s for s in points if 1 <= s <= total_steps}
+
+    @staticmethod
+    def _resolve_microbatch_count(
+        grad_accum_steps: Optional[int], microbatch_sample: Optional[str]
+    ) -> Optional[int]:
+        if grad_accum_steps is None or grad_accum_steps <= 0:
+            return None
+        if microbatch_sample is None or str(microbatch_sample).strip() == "":
+            return grad_accum_steps
+        value = str(microbatch_sample).strip().lower()
+        if value in {"all", "full", "none", "0"}:
+            return grad_accum_steps
+        if value.endswith("%"):
+            ratio = float(value[:-1]) / 100.0
+        else:
+            ratio = float(value)
+        if 0 < ratio <= 1:
+            return max(1, min(grad_accum_steps, math.ceil(grad_accum_steps * ratio)))
+        return max(1, min(grad_accum_steps, int(ratio)))
+
+    @classmethod
+    def _build_microbatch_schedule(
+        cls, grad_accum_steps: Optional[int], microbatch_sample: Optional[str]
+    ) -> Optional[Set[int]]:
+        if grad_accum_steps is None or grad_accum_steps <= 0:
+            return None
+        count = cls._resolve_microbatch_count(grad_accum_steps, microbatch_sample)
+        if count is None or count >= grad_accum_steps:
+            return set(range(1, grad_accum_steps + 1))
+        return set(cls._spread_points(1, grad_accum_steps, count))
+
+    def should_log_step(self, layer_name: Optional[str] = None) -> bool:
+        if layer_name is not None and not self.should_log_layer(layer_name):
+            return False
+        if self.selected_steps is not None:
+            return self.current_step in self.selected_steps
+        return self.current_step % self.log_every_n_steps == 0
+
+    def _observe_microbatch(self, layer_name: str) -> bool:
+        step = self.current_step
+        if self._active_step != step:
+            self._active_step = step
+            self._microbatch_index = 0
+            self._current_microbatch_selected = True
+        if self._microbatch_anchor_layer is None:
+            self._microbatch_anchor_layer = layer_name
+        if layer_name == self._microbatch_anchor_layer:
+            self._microbatch_index += 1
+            if self.selected_microbatches is None:
+                self._current_microbatch_selected = True
+            else:
+                self._current_microbatch_selected = self._microbatch_index in self.selected_microbatches
+        return self._current_microbatch_selected
+
+    def should_log_record(self, layer_name: Optional[str] = None) -> bool:
+        if layer_name is None:
+            return self.should_log_step(layer_name)
+        if not self.should_log_step(layer_name):
+            return False
+        return self._observe_microbatch(layer_name)
+
+    def _ensure_stream(self):
+        if self._stream_writer is not None:
+            return self._stream_writer
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._stream_path = self._stats_path()
+        self._stream_file = open(self._stream_path, "w", newline="")
+        self._stream_writer = csv.writer(self._stream_file)
+        self._stream_writer.writerow([
+            "step", "microbatch", "layer",
+            "A_tt", "A_tv", "R_att_text",
+            "U_vis", "U_text", "R_info",
+            "n_post_text",
+        ])
+        self._stream_file.flush()
+        return self._stream_writer
+
+    def _write_record(self, record: _AttnStepRecord) -> None:
+        writer = self._ensure_stream()
+        writer.writerow([
+            record.step, record.microbatch, record.layer,
+            f"{record.A_tt:.6f}", f"{record.A_tv:.6f}", f"{record.R_att_text:.4f}",
+            f"{record.U_vis:.6f}", f"{record.U_text:.6f}", f"{record.R_info:.4f}",
+            record.n_post_text,
+        ])
+        self._record_written += 1
+        if self._stream_file is not None:
+            self._stream_file.flush()
+
+    def _close_stream(self) -> None:
+        if self._stream_file is not None:
+            self._stream_file.flush()
+            self._stream_file.close()
+        self._stream_file = None
+        self._stream_writer = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -98,31 +297,63 @@ class AttentionLogger:
             raise ImportError("LlamaAttention not found in transformers")
 
         attn_count = 0
+        skipped = 0
         for name, module in model.named_modules():
             if isinstance(module, LlamaAttention):
-                module._log_attn         = True
-                module._attn_logger      = self
-                module._attn_layer_name  = name
-                module._attn_token_mask  = None
-                attn_count += 1
-
-        # Monkey-patch _apply_lora_token_mask to also propagate to attn modules
-        orig_apply = model._apply_lora_token_mask.__func__   # unbound method
-
-        logger_ref = self
-
-        def _patched_apply(self_model):
-            orig_apply(self_model)
-            token_mask = getattr(self_model, "current_lora_mask", None)
-            for module in self_model.model.modules():
-                if isinstance(module, LlamaAttention):
-                    module._attn_token_mask = token_mask
+                if self.should_log_layer(name):
+                    module._log_attn         = True
+                    module._attn_logger      = self
+                    module._attn_layer_name  = name
+                    module._attn_token_mask  = None
+                    attn_count += 1
+                else:
+                    module._log_attn = False
+                    skipped += 1
 
         import types
-        model._apply_lora_token_mask = types.MethodType(_patched_apply, model)
+        patch_targets = []
+        seen = set()
+        roots = [model]
+        if hasattr(model, "modules"):
+            roots.extend(list(model.modules()))
+        for target in roots:
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            if callable(getattr(target, "_apply_lora_token_mask", None)):
+                patch_targets.append(target)
+
+        for target in patch_targets:
+            if hasattr(target, "_attn_orig_apply_lora_token_mask"):
+                continue
+            bound_apply = target._apply_lora_token_mask
+            orig_func = getattr(bound_apply, "__func__", None)
+            target._attn_orig_apply_lora_token_mask = bound_apply
+
+            def _patched_apply(self_model, _orig_func=orig_func, _orig_bound=bound_apply):
+                if _orig_func is not None:
+                    _orig_func(self_model)
+                else:
+                    _orig_bound()
+                token_mask = getattr(self_model, "current_lora_mask", None)
+                module_root = getattr(self_model, "model", self_model)
+                for module in module_root.modules():
+                    if isinstance(module, LlamaAttention):
+                        module._attn_token_mask = token_mask
+
+            target._apply_lora_token_mask = types.MethodType(_patched_apply, target)
 
         self._enabled = True
-        print(f"[AttnLogger] attached to {attn_count} LlamaAttention layers")
+        schedule_desc = (f"staged {len(self.selected_steps)} steps"
+                         if self.selected_steps is not None else
+                         f"every {self.log_every_n_steps} optimizer steps")
+        layer_desc = ("all blocks" if self.layer_blocks is None else
+                      f"blocks {sorted(self.layer_blocks)}")
+        mb_desc = ("unknown micro-batches" if self.selected_microbatches is None else
+                   f"{len(self.selected_microbatches)}/{self.grad_accum_steps} micro-batches {sorted(self.selected_microbatches)}")
+        print(f"[AttnLogger] attached to {attn_count} LlamaAttention layers "
+              f"({skipped} skipped; {layer_desc}; {schedule_desc}; {mb_desc}); "
+              f"patched {len(patch_targets)} token-mask owner(s)")
 
     def step_end(self) -> None:
         self.step += 1
@@ -136,8 +367,7 @@ class AttentionLogger:
         value_states: torch.Tensor,   # [B, H, T_k, head_dim]
         o_proj_weight: torch.Tensor,  # [hidden_dim, H*head_dim]
     ) -> None:
-        if step % self.log_every_n_steps != 0:
-            return
+        self._record_calls += 1
 
         bsz = attn_weights.shape[0]
         H        = attn_weights.shape[1]
@@ -224,42 +454,26 @@ class AttentionLogger:
         if valid_b == 0 or n_post_text_total == 0:
             return
 
-        self.records.append(_AttnStepRecord(
-            step, layer_name,
+        record = _AttnStepRecord(
+            step, self._microbatch_index, layer_name,
             A_tt_wsum  / n_post_text_total,
             A_tv_wsum  / n_post_text_total,
             U_vis_wsum  / n_post_text_total,
             U_text_wsum / n_post_text_total,
             n_post_text_total / valid_b,
-        ))
+        )
+        self.records.append(record)
+        self._write_record(record)
 
     def save_csv(self, task_name: str) -> str:
         os.makedirs(self.output_dir, exist_ok=True)
-        try:
-            import torch.distributed as dist
-            rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
-        except Exception:
-            rank = 0
-
+        rank = self._rank()
         path = os.path.join(self.output_dir, f"{task_name}_rank{rank}_attn_stats.csv")
-        with open(path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "step", "layer",
-                "A_tt", "A_tv", "R_att_text",
-                "U_vis", "U_text", "R_info",
-                "n_post_text",
-            ])
-            for r in self.records:
-                w.writerow([
-                    r.step, r.layer,
-                    f"{r.A_tt:.6f}", f"{r.A_tv:.6f}", f"{r.R_att_text:.4f}",
-                    f"{r.U_vis:.6f}", f"{r.U_text:.6f}", f"{r.R_info:.4f}",
-                    r.n_post_text,
-                ])
-
+        if self._stream_writer is None and not os.path.exists(path):
+            self._ensure_stream()
+        self._close_stream()
         self._save_summary_csv(task_name, rank)
-        print(f"[AttnLogger] rank{rank} saved {len(self.records)} records → {path}")
+        print(f"[AttnLogger] rank{rank} streamed {len(self.records)} records -> {path}")
         return path
 
     def _save_summary_csv(self, task_name: str, rank: int) -> None:
@@ -308,14 +522,23 @@ class AttentionLogger:
         print(f"[AttnLogger] rank{rank} summary → {summary_path}")
 
     def clear_records(self) -> None:
+        self._close_stream()
         self.records.clear()
         self.step = 0
+        self._active_step = None
+        self._microbatch_index = 0
+        self._current_microbatch_selected = True
+        self._record_calls = 0
+        self._record_written = 0
+        self._skip_no_visual = 0
+        self._skip_no_post_text = 0
 
     def detach(self, model: nn.Module) -> None:
         try:
             from transformers.models.llama.modeling_llama import LlamaAttention
         except ImportError:
             return
+        self._close_stream()
         for module in model.modules():
             if isinstance(module, LlamaAttention):
                 module._log_attn    = False

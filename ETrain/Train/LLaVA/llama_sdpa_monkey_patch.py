@@ -136,14 +136,15 @@ def forward_sdpa(
     # ── attention logging (only during prefill, not decode) ───────────────────
     if (
         not is_decode
+        and torch.is_grad_enabled()
         and getattr(self, '_log_attn', False)
         and getattr(self, '_attn_token_mask', None) is not None
     ):
         logger_ref = getattr(self, '_attn_logger', None)
         token_mask = self._attn_token_mask
-        step       = logger_ref.step if logger_ref is not None else 0
-        log_every  = logger_ref.log_every_n_steps if logger_ref is not None else 1
-        if logger_ref is not None and step % log_every == 0:
+        step       = logger_ref.current_step if logger_ref is not None else 0
+        layer_name = getattr(self, '_attn_layer_name', 'unknown')
+        if logger_ref is not None and logger_ref.should_log_record(layer_name):
             with torch.no_grad():
                 # Recompute attention weights for stats only — no grad, not used
                 # for the actual output (attn_output already computed above via SDPA).
@@ -156,7 +157,6 @@ def forward_sdpa(
                         q_len, kv_seq_len, dtype=torch.bool, device=query_states.device))
                     logits = logits.masked_fill(cm[None, None], float("-inf"))
                 w = torch.softmax(logits.float(), dim=-1).to(query_states.dtype)
-                layer_name = getattr(self, '_attn_layer_name', 'unknown')
                 logger_ref._record(
                     step, layer_name, w, token_mask,
                     value_states, self.o_proj.weight,
