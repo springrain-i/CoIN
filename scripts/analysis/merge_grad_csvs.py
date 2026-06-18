@@ -53,6 +53,16 @@ def _format_float(value: float) -> str:
     return f"{value:.6f}" if math.isfinite(value) else str(value)
 
 
+def _grad_ratio(num: float, den: float) -> float:
+    return num / max(den, 1e-8)
+
+
+def _grad_ratio_tok(num: float, den: float, n_num: float, n_den: float) -> float:
+    if n_num <= 0 or n_den <= 0 or den < 1e-8:
+        return float("inf")
+    return (num / n_num) / max(den / n_den, 1e-12)
+
+
 def _recompute_known_ratios(row: Dict[str, float]) -> None:
     if {"A_ans_vis", "A_ans_prompt", "A_ans_prev_answer"}.issubset(row):
         denom = row["A_ans_vis"] + row["A_ans_prompt"] + row["A_ans_prev_answer"]
@@ -60,6 +70,53 @@ def _recompute_known_ratios(row: Dict[str, float]) -> None:
     if {"U_ans_vis", "U_ans_prompt", "U_ans_prev_answer"}.issubset(row):
         denom = row["U_ans_vis"] + row["U_ans_prompt"] + row["U_ans_prev_answer"]
         row["R_info_ans_vis"] = row["U_ans_vis"] / max(denom, 1e-8)
+    for bucket in ("prompt", "vis", "answer"):
+        mass_field = f"route_mass_{bucket}"
+        count_field = f"n_{bucket}"
+        mean_field = f"route_mean_{bucket}"
+        if {mass_field, count_field, mean_field}.issubset(row):
+            row[mean_field] = row[mass_field] / max(row[count_field], 1e-8)
+    for prefix in ("A", "B", "dW"):
+        prompt_field = f"G_prompt_{prefix}"
+        visual_field = f"G_vis_{prefix}"
+        answer_field = f"G_answer_{prefix}"
+        if {prompt_field, visual_field, f"R_prompt_vis_{prefix}"}.issubset(row):
+            row[f"R_prompt_vis_{prefix}"] = _grad_ratio(row[prompt_field], row[visual_field])
+        if {answer_field, visual_field, f"R_answer_vis_{prefix}"}.issubset(row):
+            row[f"R_answer_vis_{prefix}"] = _grad_ratio(row[answer_field], row[visual_field])
+        if {prompt_field, visual_field, "n_prompt", "n_vis", f"R_prompt_vis_{prefix}_tok"}.issubset(row):
+            row[f"R_prompt_vis_{prefix}_tok"] = _grad_ratio_tok(
+                row[prompt_field], row[visual_field], row["n_prompt"], row["n_vis"])
+        if {answer_field, visual_field, "n_answer", "n_vis", f"R_answer_vis_{prefix}_tok"}.issubset(row):
+            row[f"R_answer_vis_{prefix}_tok"] = _grad_ratio_tok(
+                row[answer_field], row[visual_field], row["n_answer"], row["n_vis"])
+
+
+def _identity_value(field: str, value: str):
+    if field in {"step", "microbatch", "expert"}:
+        return int(value)
+    return value
+
+
+def _add_derived_fields(fields: List[str]) -> List[str]:
+    result = list(fields)
+    available = set(fields)
+    for prefix in ("A", "B", "dW"):
+        if {f"G_prompt_{prefix}", f"G_vis_{prefix}"}.issubset(available):
+            result.append(f"R_prompt_vis_{prefix}")
+        if {f"G_answer_{prefix}", f"G_vis_{prefix}"}.issubset(available):
+            result.append(f"R_answer_vis_{prefix}")
+        if {f"G_prompt_{prefix}", f"G_vis_{prefix}", "n_prompt", "n_vis"}.issubset(available):
+            result.append(f"R_prompt_vis_{prefix}_tok")
+        if {f"G_answer_{prefix}", f"G_vis_{prefix}", "n_answer", "n_vis"}.issubset(available):
+            result.append(f"R_answer_vis_{prefix}_tok")
+    deduped = []
+    seen = set()
+    for field in result:
+        if field not in seen:
+            deduped.append(field)
+            seen.add(field)
+    return deduped
 
 
 def merge_task_generic(
@@ -79,14 +136,14 @@ def merge_task_generic(
     missing_ids = [field for field in id_fields if field not in header]
     if missing_ids:
         raise ValueError(f"{rank_files[0]} missing identity fields: {missing_ids}")
-    data_fields = [field for field in header if field not in id_fields]
+    data_fields = _add_derived_fields([field for field in header if field not in id_fields])
 
     agg: dict = defaultdict(lambda: {field: [] for field in data_fields})
     for row in rows:
-        key = tuple(row[field] for field in id_fields)
+        key = tuple(_identity_value(field, row[field]) for field in id_fields)
         bucket = agg[key]
         for field in data_fields:
-            bucket[field].append(_to_float(row[field]))
+            bucket[field].append(_to_float(row.get(field)))
 
     os.makedirs(output_dir, exist_ok=True)
     stats_path = os.path.join(output_dir, f"{task_name}_merged_{kind}_stats.csv")
