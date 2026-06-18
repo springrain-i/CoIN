@@ -599,38 +599,6 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                             rows[expert_id].update({k: v for k, v in update.items() if k != 'expert'})
                 return rows
 
-            def _summarize_expert_dw(g_lora_out, x_cap):
-                rows = []
-                route_cap = router.detach().to(device=lora_x.device)
-                d_out, d_in = B_shape[1], A_shape[2]
-                for expert_id in range(self.expert_num):
-                    matrices = {
-                        'prompt': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
-                        'vis': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
-                        'answer': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
-                    }
-                    for b in range(log_mask.shape[0]):
-                        idx = _bucket_indices(b)
-                        for bucket in ('prompt', 'vis', 'answer'):
-                            token_idx = idx[bucket]
-                            if token_idx.any():
-                                weights = route_cap[b, token_idx, expert_id].to(dtype=A_dtype).unsqueeze(-1)
-                                weighted_grad = _stat_tensor(g_lora_out[b, token_idx], A_dtype) * weights
-                                matrices[bucket] += weighted_grad.T @ _stat_tensor(x_cap[b, token_idx], A_dtype)
-                    prompt = matrices['prompt']
-                    vis = matrices['vis']
-                    answer = matrices['answer']
-                    rows.append({
-                        'expert': expert_id,
-                        'expert_grad_dW_prompt': prompt.norm().item(),
-                        'expert_grad_dW_vis': vis.norm().item(),
-                        'expert_grad_dW_answer': answer.norm().item(),
-                        'cos_dW_prompt_vis': _cosine(prompt, vis),
-                        'cos_dW_answer_vis': _cosine(answer, vis),
-                        'cos_dW_prompt_answer': _cosine(prompt, answer),
-                    })
-                return rows
-
             out_A = torch.einsum('bti,nri->btnr', lora_x, A)  # (B,T,N,r_per)
             out_B = torch.einsum('btnr,nor->btno', out_A, B)   # (B,T,N,d_out)
 
@@ -670,10 +638,7 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                     logger_ref._pending_dw[(step, layer_name)] = {
                         'metrics': _summarize('dW', matrices),
                         'counts': counts,
-                        'expert_rows': _merge_expert_rows(
-                            _route_expert_rows(),
-                            _summarize_expert_dw(g_lora_out, x_cap),
-                        ),
+                        'expert_rows': _route_expert_rows(),
                     }
 
             # ── hook_B: exact W_B metric using out_A ──────────────────────────────

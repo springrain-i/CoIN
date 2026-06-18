@@ -24,6 +24,9 @@ Direction metrics:
   following the gradient-direction diagnostic idea used in MMPareto/BalGrad.
 
 Expert-wise diagnostics are streamed separately as bucket x expert stats.
+They keep A/B gradients and route usage only. Expert-wise effective ΔW is
+intentionally omitted because it requires per-expert [d_out, d_in] matrices and
+is much more expensive than the A/B slices.
 """
 import csv
 import math
@@ -37,7 +40,7 @@ import torch.nn as nn
 
 
 EXPERT_BUCKETS = ("prompt", "vis", "answer")
-EXPERT_METRIC_PREFIXES = ("A", "B", "dW")
+EXPERT_METRIC_PREFIXES = ("A", "B")
 EXPERT_FIELDS = (
     ["route_mean_prompt", "route_mean_vis", "route_mean_answer",
      "route_mass_prompt", "route_mass_vis", "route_mass_answer",
