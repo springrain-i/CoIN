@@ -1,79 +1,81 @@
 """
-AttentionLogger — records per-modality cross-attention statistics for LlamaAttention layers.
+AttentionLogger records answer-query attention usage for LlamaAttention layers.
 
-Two attention-budget fractions per (step, layer).  Query positions are restricted to
-post-image text tokens (B-1 fix): text tokens that appear AFTER the last visual token,
-because only these can causally attend to visual keys.  Pre-image text tokens have
-A_tv = 0 by causal constraint and are excluded to avoid polluting the signal.
+Query buckets:
+  ans            all positions that predict answer tokens
+  assistant      prompt/assistant position that predicts the first answer token
+  answer_prefix  answer-token positions that predict later answer tokens
 
-  A_tt  mean fraction of post-image text query attention on text  keys
-  A_tv  mean fraction of post-image text query attention on vis   keys  (key metric)
+Source buckets:
+  vis            visual tokens
+  prompt         prompt text tokens, including the assistant prefix token
+  prev_answer    answer tokens available as causal history
 
-  A_tt + A_tv ≈ 1  (softmax normalisation; padding keys masked to -inf)
+For each query/source pair, the logger writes:
+  A_{query}_{source}: mean attention mass assigned to that source bucket
+  U_{query}_{source}: mean output-space norm of attention-weighted values
 
-Aggregation across batch elements uses token-count-weighted average (B-2 fix):
-each post-image text query token contributes equally, regardless of how many
-such tokens a given batch element has.
+The A metrics follow the generated-token attention analysis style used by
+"What's in the Image? A Deep-Dive into the Vision of Vision Language Models".
+The U metrics keep the value-contribution view used in CoLM 2025-style
+attention information-flow diagnostics: attention_weight * value, projected
+through the per-head output projection block.
 
-Information-flow metrics (Wu et al., CoLM 2025, arXiv 2510.02608):
-
-  u_vis^(b,h,q)  = W_O_h @ Σ_{j∈vis}  w[b,h,q,j] · v[b,h,j,:]   [hidden_dim]
-  u_text^(b,h,q) = W_O_h @ Σ_{j∈text} w[b,h,q,j] · v[b,h,j,:]   [hidden_dim]
-  U_vis  = E_{b,h,q∈ans-tok}[ ‖u_vis^(b,h,q)‖₂ ]
-  U_text = E_{b,h,q∈ans-tok}[ ‖u_text^(b,h,q)‖₂ ]
-  R_info = U_vis / (U_vis + U_text)
-
-W_O is split per head: W_O_h = o_proj.weight[:, h*d:(h+1)*d], shape [hidden_dim, head_dim].
-U values use the same token-count-weighted average as A_tt / A_tv.
-
-Derived ratios:
-  R_att_text = A_tt / (A_tt + A_tv)   ≈ A_tt
-  R_info     = U_vis / (U_vis + U_text)
-
-Multi-GPU: each rank writes its own CSV; merge with merge_grad_csvs.py.
+Multi-GPU: each rank writes its own CSV; merge downstream for combined analysis.
 """
 import csv
 import math
 import os
 import statistics
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, TextIO, Tuple
+from typing import Dict, List, Optional, Set, TextIO
 
 import torch
 import torch.nn as nn
 
 
+QUERY_GROUPS = ("ans", "assistant", "answer_prefix")
+SOURCE_GROUPS = ("vis", "prompt", "prev_answer")
+ATTN_METRIC_FIELDS = (
+    [f"A_{query}_{source}" for query in QUERY_GROUPS for source in SOURCE_GROUPS]
+    + [f"U_{query}_{source}" for query in QUERY_GROUPS for source in SOURCE_GROUPS]
+    + ["R_att_ans_vis", "R_info_ans_vis"]
+)
+ATTN_COUNT_FIELDS = ["n_ans_query", "n_assistant_query", "n_answer_prefix_query"]
+
+
 class _AttnStepRecord:
-    __slots__ = ("step", "microbatch", "layer", "A_tt", "A_tv", "U_vis", "U_text", "n_post_text")
+    __slots__ = ("step", "microbatch", "layer", "metrics", "counts")
 
-    def __init__(self, step, microbatch, layer, A_tt, A_tv, U_vis, U_text, n_post_text):
-        self.step        = step
-        self.microbatch  = microbatch
-        self.layer       = layer
-        self.A_tt        = A_tt
-        self.A_tv        = A_tv
-        self.U_vis       = U_vis
-        self.U_text      = U_text
-        self.n_post_text = n_post_text
+    def __init__(self, step: int, microbatch: int, layer: str, metrics: Dict[str, float], counts: Dict[str, int]):
+        self.step = step
+        self.microbatch = microbatch
+        self.layer = layer
+        self.metrics = metrics
+        self.counts = counts
 
-    @property
-    def R_att_text(self):
-        return self.A_tt / max(self.A_tt + self.A_tv, 1e-8)
+    def metric(self, name: str) -> float:
+        return float(self.metrics.get(name, 0.0))
 
-    @property
-    def R_info(self):
-        return self.U_vis / max(self.U_vis + self.U_text, 1e-8)
+    def count(self, name: str) -> int:
+        return int(self.counts.get(name, 0))
 
 
 class AttentionLogger:
     """
     Attach to model once; receives _record() calls from the SDPA patch on each
-    prefill forward; call step_end() after each optimizer step; save_csv() at task end.
+    prefill forward; call step_end() after each optimizer step; save_csv() at
+    task end.
 
     Token mask propagation: monkey-patches _apply_lora_token_mask so that
-    LlamaAttention modules also receive _attn_token_mask on each forward — no
-    changes to llava_llama.py needed.
+    LlamaAttention modules receive the same diagnostic masks used by the grad
+    logger.
     """
+
+    QUERY_GROUPS = QUERY_GROUPS
+    SOURCE_GROUPS = SOURCE_GROUPS
+    METRIC_FIELDS = ATTN_METRIC_FIELDS
+    COUNT_FIELDS = ATTN_COUNT_FIELDS
 
     def __init__(
         self,
@@ -110,7 +112,7 @@ class AttentionLogger:
         self._record_calls = 0
         self._record_written = 0
         self._skip_no_visual = 0
-        self._skip_no_post_text = 0
+        self._skip_no_answer_query = 0
 
     @property
     def current_step(self) -> int:
@@ -124,9 +126,9 @@ class AttentionLogger:
         except Exception:
             return 0
 
-    def _stats_path(self) -> str:
+    def _stats_path(self, task_name: Optional[str] = None) -> str:
         rank = self._rank()
-        return os.path.join(self.output_dir, f"{self.task_name}_rank{rank}_attn_stats.csv")
+        return os.path.join(self.output_dir, f"{task_name or self.task_name}_rank{rank}_attn_stats.csv")
 
     @staticmethod
     def _parse_layer_blocks(layer_blocks: Optional[str]) -> Optional[Set[int]]:
@@ -256,23 +258,23 @@ class AttentionLogger:
         self._stream_path = self._stats_path()
         self._stream_file = open(self._stream_path, "w", newline="")
         self._stream_writer = csv.writer(self._stream_file)
-        self._stream_writer.writerow([
-            "step", "microbatch", "layer",
-            "A_tt", "A_tv", "R_att_text",
-            "U_vis", "U_text", "R_info",
-            "n_post_text",
-        ])
+        self._stream_writer.writerow(
+            ["step", "microbatch", "layer"] + self.METRIC_FIELDS + self.COUNT_FIELDS
+        )
         self._stream_file.flush()
         return self._stream_writer
 
     def _write_record(self, record: _AttnStepRecord) -> None:
         writer = self._ensure_stream()
-        writer.writerow([
-            record.step, record.microbatch, record.layer,
-            f"{record.A_tt:.6f}", f"{record.A_tv:.6f}", f"{record.R_att_text:.4f}",
-            f"{record.U_vis:.6f}", f"{record.U_text:.6f}", f"{record.R_info:.4f}",
-            record.n_post_text,
-        ])
+        metric_values = []
+        for field in self.METRIC_FIELDS:
+            value = record.metric(field)
+            metric_values.append(f"{value:.6f}" if math.isfinite(value) else str(value))
+        writer.writerow(
+            [record.step, record.microbatch, record.layer]
+            + metric_values
+            + [record.count(field) for field in self.COUNT_FIELDS]
+        )
         self._record_written += 1
         if self._stream_file is not None:
             self._stream_file.flush()
@@ -284,12 +286,10 @@ class AttentionLogger:
         self._stream_file = None
         self._stream_writer = None
 
-    # ── public API ────────────────────────────────────────────────────────────
-
     def attach(self, model: nn.Module) -> None:
         """
-        1. Set _log_attn / _attn_logger / _attn_layer_name on each LlamaAttention.
-        2. Monkey-patch _apply_lora_token_mask to also push token_mask to attn layers.
+        1. Set _log_attn / _attn_logger / _attn_layer_name on LlamaAttention.
+        2. Patch _apply_lora_token_mask to also push diagnostic masks to attention.
         """
         try:
             from transformers.models.llama.modeling_llama import LlamaAttention
@@ -301,10 +301,14 @@ class AttentionLogger:
         for name, module in model.named_modules():
             if isinstance(module, LlamaAttention):
                 if self.should_log_layer(name):
-                    module._log_attn         = True
-                    module._attn_logger      = self
-                    module._attn_layer_name  = name
-                    module._attn_token_mask  = None
+                    module._log_attn = True
+                    module._attn_logger = self
+                    module._attn_layer_name = name
+                    module._attn_token_mask = None
+                    module._attn_grad_token_mask = None
+                    module._attn_answer_query_mask = None
+                    module._attn_assistant_query_mask = None
+                    module._attn_answer_prefix_query_mask = None
                     attn_count += 1
                 else:
                     module._log_attn = False
@@ -336,10 +340,18 @@ class AttentionLogger:
                 else:
                     _orig_bound()
                 token_mask = getattr(self_model, "current_lora_mask", None)
+                grad_token_mask = getattr(self_model, "current_grad_token_mask", token_mask)
+                answer_query_mask = getattr(self_model, "current_answer_query_mask", None)
+                assistant_query_mask = getattr(self_model, "current_assistant_query_mask", None)
+                answer_prefix_query_mask = getattr(self_model, "current_answer_prefix_query_mask", None)
                 module_root = getattr(self_model, "model", self_model)
                 for module in module_root.modules():
                     if isinstance(module, LlamaAttention):
                         module._attn_token_mask = token_mask
+                        module._attn_grad_token_mask = grad_token_mask
+                        module._attn_answer_query_mask = answer_query_mask
+                        module._attn_assistant_query_mask = assistant_query_mask
+                        module._attn_answer_prefix_query_mask = answer_prefix_query_mask
 
             target._apply_lora_token_mask = types.MethodType(_patched_apply, target)
 
@@ -358,117 +370,136 @@ class AttentionLogger:
     def step_end(self) -> None:
         self.step += 1
 
+    @staticmethod
+    def _align_mask(
+        mask: Optional[torch.Tensor],
+        bsz: int,
+        seq_len: int,
+        device: torch.device,
+        dtype: Optional[torch.dtype] = None,
+    ) -> Optional[torch.Tensor]:
+        if mask is None or mask.dim() != 2 or mask.shape[0] != bsz:
+            return None
+        if mask.shape[1] == seq_len:
+            aligned = mask
+        elif mask.shape[1] > seq_len:
+            aligned = mask[:, -seq_len:]
+        else:
+            return None
+        if dtype is not None:
+            aligned = aligned.to(dtype=dtype)
+        return aligned.to(device=device)
+
     def _record(
         self,
         step: int,
         layer_name: str,
-        attn_weights: torch.Tensor,   # [B, H, T_q, T_k]  float32
-        token_mask: torch.Tensor,     # [B, T]  int (2=text,1=vis,0=pad)
-        value_states: torch.Tensor,   # [B, H, T_k, head_dim]
-        o_proj_weight: torch.Tensor,  # [hidden_dim, H*head_dim]
+        attn_weights: torch.Tensor,          # [B, H, T_q, T_k]
+        token_mask: torch.Tensor,            # [B, T_k], 1=visual, 2=text, 0=pad
+        grad_token_mask: Optional[torch.Tensor],       # [B, T_k], 1=visual, 2=prompt, 3=answer
+        answer_query_mask: Optional[torch.Tensor],     # [B, T_q]
+        assistant_query_mask: Optional[torch.Tensor],  # [B, T_q]
+        answer_prefix_query_mask: Optional[torch.Tensor],  # [B, T_q]
+        value_states: torch.Tensor,          # [B, H, T_k, head_dim]
+        o_proj_weight: torch.Tensor,         # [hidden_dim, H*head_dim]
     ) -> None:
         self._record_calls += 1
 
-        bsz = attn_weights.shape[0]
-        H        = attn_weights.shape[1]
-        head_d   = value_states.shape[-1]
+        bsz, num_heads, q_len, kv_len = attn_weights.shape
+        head_d = value_states.shape[-1]
         hidden_d = o_proj_weight.shape[0]
+        device = attn_weights.device
 
-        # B-2: weighted sums (weight = n_post_text per element)
-        A_tt_wsum   = A_tv_wsum   = 0.0
-        U_vis_wsum  = U_text_wsum = 0.0
-        n_post_text_total = 0   # total post-image text query tokens across batch
-        valid_b = 0
-
-        with torch.no_grad():
-            # W_O split into per-head blocks: [H, head_dim, hidden_dim]
-            # Non-contiguous view; matmul handles this without an extra copy.
-            W_O_T = (o_proj_weight
-                     .float()
-                     .view(hidden_d, H, head_d)
-                     .permute(1, 2, 0))  # [H, head_d, hidden_d]
-
-            for b in range(bsz):
-                t_mask = (token_mask[b] == 2)   # [T]  all text positions
-                v_mask = (token_mask[b] == 1)   # [T]  all visual positions (key side)
-                nv = int(v_mask.sum())
-
-                if nv == 0:
-                    continue   # skip pure-text elements (no visual keys to measure)
-
-                # B-1: restrict text queries to positions AFTER the last visual token.
-                # Pre-image text tokens have A_tv = 0 by causal masking (they cannot
-                # attend to future visual tokens), which would bias the mean toward 0
-                # regardless of model behaviour.
-                vis_positions = v_mask.nonzero(as_tuple=True)[0]
-                last_vis_pos  = int(vis_positions[-1])
-                post_img_t_mask = t_mask.clone()
-                post_img_t_mask[:last_vis_pos + 1] = False   # exclude pre-image text
-                n_post = int(post_img_t_mask.sum())
-
-                if n_post == 0:
-                    continue   # image is last token; no answer tokens to measure
-
-                w = attn_weights[b]  # [H, T_q, T_k]
-
-                # Answer token queries only (B-1 fix).
-                # sum(-1) over key dimension; mean over (H, T_post) positions.
-                # A_tt + A_tv ≈ 1: pad/future keys masked to -inf.
-                w_tq = w[:, post_img_t_mask, :]          # [H, T_post, T_k]
-                A_tt = w_tq[:, :, t_mask].sum(-1).mean().item()
-                A_tv = w_tq[:, :, v_mask].sum(-1).mean().item()
-
-                # --- U_vis / U_text: information-flow metrics ---
-                # Per head h, per answer token q:
-                #   vis_sum[h,q] = Σ_{j∈vis}  w[h,q,j] · v[h,j,:]  → [head_d]
-                #   u_vis[h,q]   = W_O_h @ vis_sum[h,q]              → [hidden_d]
-                # U_vis_b = mean over (H, T_post) of ‖u_vis[h,q]‖₂
-                v_b = value_states[b].float()  # [H, T_k, head_d]
-
-                vis_sum  = torch.matmul(
-                    w_tq[:, :, v_mask].float(),  # [H, T_post, n_vis]
-                    v_b[:, v_mask, :],            # [H, n_vis,  head_d]
-                )                                 # [H, T_post, head_d]
-                text_sum = torch.matmul(
-                    w_tq[:, :, t_mask].float(),  # [H, T_post, n_text]
-                    v_b[:, t_mask, :],            # [H, n_text, head_d]
-                )                                 # [H, T_post, head_d]
-
-                # Apply per-head W_O: [H,T_post,head_d] @ [H,head_d,hidden_d]
-                u_vis  = torch.matmul(vis_sum,  W_O_T)  # [H, T_post, hidden_d]
-                u_text = torch.matmul(text_sum, W_O_T)  # [H, T_post, hidden_d]
-
-                U_vis_b  = u_vis.norm(dim=-1).mean().item()
-                U_text_b = u_text.norm(dim=-1).mean().item()
-
-                del v_b, vis_sum, text_sum, u_vis, u_text
-
-                # B-2: accumulate weighted by token count so each token contributes equally.
-                A_tt_wsum  += A_tt   * n_post
-                A_tv_wsum  += A_tv   * n_post
-                U_vis_wsum  += U_vis_b  * n_post
-                U_text_wsum += U_text_b * n_post
-                n_post_text_total += n_post
-                valid_b += 1
-
-        if valid_b == 0 or n_post_text_total == 0:
+        token_mask = self._align_mask(token_mask, bsz, kv_len, device, torch.long)
+        grad_token_mask = self._align_mask(grad_token_mask, bsz, kv_len, device, torch.long)
+        if grad_token_mask is None:
+            grad_token_mask = token_mask
+        answer_query_mask = self._align_mask(answer_query_mask, bsz, q_len, device, torch.bool)
+        assistant_query_mask = self._align_mask(assistant_query_mask, bsz, q_len, device, torch.bool)
+        answer_prefix_query_mask = self._align_mask(answer_prefix_query_mask, bsz, q_len, device, torch.bool)
+        if token_mask is None or grad_token_mask is None or answer_query_mask is None:
             return
 
-        record = _AttnStepRecord(
-            step, self._microbatch_index, layer_name,
-            A_tt_wsum  / n_post_text_total,
-            A_tv_wsum  / n_post_text_total,
-            U_vis_wsum  / n_post_text_total,
-            U_text_wsum / n_post_text_total,
-            n_post_text_total / valid_b,
-        )
+        query_masks = {
+            "ans": answer_query_mask,
+            "assistant": assistant_query_mask if assistant_query_mask is not None else torch.zeros_like(answer_query_mask),
+            "answer_prefix": (
+                answer_prefix_query_mask if answer_prefix_query_mask is not None
+                else torch.zeros_like(answer_query_mask)
+            ),
+        }
+        if not query_masks["ans"].any():
+            self._skip_no_answer_query += 1
+            return
+
+        metrics_sum = {field: 0.0 for field in self.METRIC_FIELDS}
+        count_sum = {field: 0 for field in self.COUNT_FIELDS}
+
+        with torch.no_grad():
+            W_O_T = (
+                o_proj_weight.float()
+                .view(hidden_d, num_heads, head_d)
+                .permute(1, 2, 0)
+            )  # [H, head_d, hidden_d]
+
+            for b in range(bsz):
+                visual_mask = grad_token_mask[b] == 1
+                if not visual_mask.any():
+                    self._skip_no_visual += 1
+                    continue
+                source_masks = {
+                    "vis": visual_mask,
+                    "prompt": grad_token_mask[b] == 2,
+                    "prev_answer": grad_token_mask[b] == 3,
+                }
+                w_b = attn_weights[b]       # [H, T_q, T_k]
+                v_b = value_states[b].float()  # [H, T_k, head_d]
+
+                for query_name, q_mask_all in query_masks.items():
+                    q_mask = q_mask_all[b].bool()
+                    n_query = int(q_mask.sum().item())
+                    if n_query == 0:
+                        continue
+                    w_q = w_b[:, q_mask, :]  # [H, T_query, T_k]
+                    count_sum[f"n_{query_name}_query"] += n_query
+
+                    for source_name, source_mask in source_masks.items():
+                        metric_a = f"A_{query_name}_{source_name}"
+                        metric_u = f"U_{query_name}_{source_name}"
+                        if not source_mask.any():
+                            continue
+                        source_weight = w_q[:, :, source_mask].float()
+                        attn_mass = source_weight.sum(dim=-1).mean().item()
+                        source_sum = torch.matmul(source_weight, v_b[:, source_mask, :])
+                        u_source = torch.matmul(source_sum, W_O_T)
+                        value_norm = u_source.norm(dim=-1).mean().item()
+                        metrics_sum[metric_a] += attn_mass * n_query
+                        metrics_sum[metric_u] += value_norm * n_query
+
+        if count_sum["n_ans_query"] == 0:
+            self._skip_no_answer_query += 1
+            return
+
+        metrics: Dict[str, float] = {}
+        for query_name in self.QUERY_GROUPS:
+            denom = max(count_sum[f"n_{query_name}_query"], 1)
+            for source_name in self.SOURCE_GROUPS:
+                metrics[f"A_{query_name}_{source_name}"] = metrics_sum[f"A_{query_name}_{source_name}"] / denom
+                metrics[f"U_{query_name}_{source_name}"] = metrics_sum[f"U_{query_name}_{source_name}"] / denom
+
+        ans_att_denom = sum(metrics[f"A_ans_{source}"] for source in self.SOURCE_GROUPS)
+        ans_info_denom = sum(metrics[f"U_ans_{source}"] for source in self.SOURCE_GROUPS)
+        metrics["R_att_ans_vis"] = metrics["A_ans_vis"] / max(ans_att_denom, 1e-8)
+        metrics["R_info_ans_vis"] = metrics["U_ans_vis"] / max(ans_info_denom, 1e-8)
+
+        record = _AttnStepRecord(step, self._microbatch_index, layer_name, metrics, count_sum)
         self.records.append(record)
         self._write_record(record)
 
     def save_csv(self, task_name: str) -> str:
         os.makedirs(self.output_dir, exist_ok=True)
         rank = self._rank()
-        path = os.path.join(self.output_dir, f"{task_name}_rank{rank}_attn_stats.csv")
+        path = self._stats_path(task_name)
         if self._stream_writer is None and not os.path.exists(path):
             self._ensure_stream()
         self._close_stream()
@@ -479,47 +510,41 @@ class AttentionLogger:
     def _save_summary_csv(self, task_name: str, rank: int) -> None:
         if not self.records:
             return
-        layer_data: dict = defaultdict(
-            lambda: {"A_tt": [], "A_tv": [], "U_vis": [], "U_text": []})
-        for r in self.records:
-            d = layer_data[r.layer]
-            d["A_tt"].append(r.A_tt);   d["A_tv"].append(r.A_tv)
-            d["U_vis"].append(r.U_vis); d["U_text"].append(r.U_text)
+        layer_data: dict = defaultdict(list)
+        for record in self.records:
+            layer_data[record.layer].append(record)
+
+        def _mean_metric(records: List[_AttnStepRecord], field: str) -> float:
+            values = [record.metric(field) for record in records]
+            finite_values = [value for value in values if math.isfinite(value)]
+            if not finite_values:
+                return float("inf")
+            return statistics.mean(finite_values)
+
+        def _mean_count(records: List[_AttnStepRecord], field: str) -> float:
+            return statistics.mean([record.count(field) for record in records])
 
         summary_path = os.path.join(
             self.output_dir, f"{task_name}_rank{rank}_attn_summary.csv")
         with open(summary_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "scope", "layer",
-                "mean_A_tt", "mean_A_tv", "R_att_text",
-                "mean_U_vis", "mean_U_text", "R_info",
-                "n_steps",
-            ])
-            all_tt, all_tv, all_uv, all_ut = [], [], [], []
-            for layer, d in sorted(layer_data.items()):
-                mt  = statistics.mean(d["A_tt"]);  mv  = statistics.mean(d["A_tv"])
-                muv = statistics.mean(d["U_vis"]); mut = statistics.mean(d["U_text"])
-                R_text = mt  / max(mt  + mv,  1e-8)
-                R_info = muv / max(muv + mut, 1e-8)
-                w.writerow([
-                    "layer", layer,
-                    f"{mt:.6f}",  f"{mv:.6f}",  f"{R_text:.4f}",
-                    f"{muv:.6f}", f"{mut:.6f}",  f"{R_info:.4f}",
-                    len(d["A_tt"]),
-                ])
-                all_tt.extend(d["A_tt"]);  all_tv.extend(d["A_tv"])
-                all_uv.extend(d["U_vis"]); all_ut.extend(d["U_text"])
-
-            gtt  = statistics.mean(all_tt); gtv  = statistics.mean(all_tv)
-            guv  = statistics.mean(all_uv); gut  = statistics.mean(all_ut)
-            w.writerow([
-                "global", "ALL",
-                f"{gtt:.6f}",  f"{gtv:.6f}",  f"{gtt/max(gtt+gtv,1e-8):.4f}",
-                f"{guv:.6f}",  f"{gut:.6f}",  f"{guv/max(guv+gut,1e-8):.4f}",
-                len(self.records),
-            ])
-        print(f"[AttnLogger] rank{rank} summary → {summary_path}")
+            writer = csv.writer(f)
+            writer.writerow(
+                ["scope", "layer", "n_records"]
+                + [f"mean_{field}" for field in self.METRIC_FIELDS]
+                + [f"mean_{field}" for field in self.COUNT_FIELDS]
+            )
+            for layer, records in sorted(layer_data.items()):
+                writer.writerow(
+                    ["layer", layer, len(records)]
+                    + [f"{_mean_metric(records, field):.6f}" for field in self.METRIC_FIELDS]
+                    + [f"{_mean_count(records, field):.2f}" for field in self.COUNT_FIELDS]
+                )
+            writer.writerow(
+                ["global", "ALL", len(self.records)]
+                + [f"{_mean_metric(self.records, field):.6f}" for field in self.METRIC_FIELDS]
+                + [f"{_mean_count(self.records, field):.2f}" for field in self.COUNT_FIELDS]
+            )
+        print(f"[AttnLogger] rank{rank} summary -> {summary_path}")
 
     def clear_records(self) -> None:
         self._close_stream()
@@ -531,7 +556,7 @@ class AttentionLogger:
         self._record_calls = 0
         self._record_written = 0
         self._skip_no_visual = 0
-        self._skip_no_post_text = 0
+        self._skip_no_answer_query = 0
 
     def detach(self, model: nn.Module) -> None:
         try:
@@ -541,6 +566,11 @@ class AttentionLogger:
         self._close_stream()
         for module in model.modules():
             if isinstance(module, LlamaAttention):
-                module._log_attn    = False
+                module._log_attn = False
                 module._attn_logger = None
+                module._attn_token_mask = None
+                module._attn_grad_token_mask = None
+                module._attn_answer_query_mask = None
+                module._attn_assistant_query_mask = None
+                module._attn_answer_prefix_query_mask = None
         self._enabled = False

@@ -91,6 +91,34 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def _set_lora_logging_masks(self, token_mask, labels):
+        """Build masks used only by diagnostics; keep current_lora_mask unchanged.
+
+        current_lora_mask keeps the training semantics: 1=visual, 2=text, 0=pad.
+        current_grad_token_mask refines text into prompt text and answer text:
+        1=visual, 2=prompt text, 3=answer text, 0=pad.
+        """
+        self.current_grad_token_mask = token_mask.clone()
+        zero_query_mask = torch.zeros_like(token_mask, dtype=torch.bool)
+        self.current_answer_query_mask = zero_query_mask
+        self.current_assistant_query_mask = zero_query_mask
+        self.current_answer_prefix_query_mask = zero_query_mask
+
+        if labels is None or labels.shape != token_mask.shape:
+            return
+
+        text_mask = token_mask == 2
+        answer_text_mask = text_mask & (labels != IGNORE_INDEX)
+        self.current_grad_token_mask[answer_text_mask] = 3
+
+        answer_query_mask = torch.zeros_like(token_mask, dtype=torch.bool)
+        if labels.shape[1] > 1:
+            answer_query_mask[:, :-1] = labels[:, 1:] != IGNORE_INDEX
+
+        self.current_answer_query_mask = answer_query_mask
+        self.current_assistant_query_mask = answer_query_mask & text_mask & (labels == IGNORE_INDEX)
+        self.current_answer_prefix_query_mask = answer_query_mask & answer_text_mask
+
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         image_features = self.get_model().mm_projector(image_features)
@@ -112,6 +140,7 @@ class LlavaMetaForCausalLM(ABC):
             if attention_mask is None:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
             self.current_lora_mask = attention_mask.to(dtype=torch.long) * 2
+            self._set_lora_logging_masks(self.current_lora_mask, labels)
             if not hasattr(self, "_lora_token_stats"):
                 self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
             mask = self.current_lora_mask
@@ -282,6 +311,7 @@ class LlavaMetaForCausalLM(ABC):
             position_ids = None
 
         self.current_lora_mask = new_token_mask_padded
+        self._set_lora_logging_masks(new_token_mask_padded, new_labels_padded if _labels is not None else None)
         if not hasattr(self, "_lora_token_stats"):
             self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
         mask = self.current_lora_mask

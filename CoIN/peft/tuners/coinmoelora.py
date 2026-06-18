@@ -424,8 +424,13 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             #
             # Backward order: hook_lora_out → hook_B → hook_A (flushes all)
             # x_ref freed in hook_A; out_A_ref freed in hook_B.
-            raw_mask   = self.token_mask
-            step       = logger_ref.current_step
+            raw_mask = getattr(self, 'grad_token_mask', None)
+            if raw_mask is None:
+                raw_mask = self.token_mask
+            assistant_query_mask = getattr(self, 'assistant_query_mask', None)
+            answer_prefix_query_mask = getattr(self, 'answer_prefix_query_mask', None)
+            is_q_proj = layer_name.endswith('q_proj') or '.q_proj' in layer_name
+            step = logger_ref.current_step
 
             A_shape, A_dtype, A_device = A.shape, A.dtype, A.device
             # B shape for G_B zero tensor: (N, d_out, r_per); infer from B itself
@@ -435,6 +440,196 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 # Match the MoE-LoRA parameter dtype for observational stats only;
                 # hooks do not return gradients and do not alter the training path.
                 return tensor if tensor.dtype == dtype else tensor.to(dtype)
+
+            def _align_mask(mask, batch, seq_len, device):
+                if mask is None:
+                    return None
+                if mask.shape[0] != batch:
+                    return None
+                if mask.shape[1] != seq_len:
+                    if seq_len == 1 and mask.shape[1] > 1:
+                        mask = mask[:, -1:]
+                    else:
+                        return None
+                return mask.to(device=device)
+
+            log_mask = _align_mask(raw_mask, lora_x.shape[0], lora_x.shape[1], lora_x.device)
+            if log_mask is None:
+                log_mask = torch.full(
+                    (lora_x.shape[0], lora_x.shape[1]),
+                    2,
+                    dtype=torch.long,
+                    device=lora_x.device,
+                )
+            assistant_query_mask = _align_mask(
+                assistant_query_mask, lora_x.shape[0], lora_x.shape[1], lora_x.device)
+            answer_prefix_query_mask = _align_mask(
+                answer_prefix_query_mask, lora_x.shape[0], lora_x.shape[1], lora_x.device)
+
+            def _zero(shape, dtype):
+                return torch.zeros(shape, dtype=dtype, device=A_device)
+
+            def _bucket_store(shape, dtype):
+                store = {
+                    'vis': _zero(shape, dtype),
+                    'prompt': _zero(shape, dtype),
+                    'answer': _zero(shape, dtype),
+                }
+                if is_q_proj:
+                    store['assistant_query'] = _zero(shape, dtype)
+                    store['answer_prefix_query'] = _zero(shape, dtype)
+                else:
+                    store['assistant_query'] = None
+                    store['answer_prefix_query'] = None
+                return store
+
+            def _cosine(a, b):
+                if a is None or b is None:
+                    return 0.0
+                a_flat = a.reshape(-1).float()
+                b_flat = b.reshape(-1).float()
+                denom = a_flat.norm() * b_flat.norm()
+                if denom.item() <= 1e-12:
+                    return 0.0
+                return float(torch.dot(a_flat, b_flat).div(denom).item())
+
+            def _norm_or_zero(matrix):
+                return 0.0 if matrix is None else matrix.norm().item()
+
+            def _summarize(prefix, matrices):
+                return {
+                    f'G_vis_{prefix}': _norm_or_zero(matrices['vis']),
+                    f'G_prompt_{prefix}': _norm_or_zero(matrices['prompt']),
+                    f'G_answer_{prefix}': _norm_or_zero(matrices['answer']),
+                    f'G_assistant_query_{prefix}': _norm_or_zero(matrices['assistant_query']),
+                    f'G_answer_prefix_query_{prefix}': _norm_or_zero(matrices['answer_prefix_query']),
+                    f'cos_prompt_vis_{prefix}': _cosine(matrices['prompt'], matrices['vis']),
+                    f'cos_answer_vis_{prefix}': _cosine(matrices['answer'], matrices['vis']),
+                    f'cos_prompt_answer_{prefix}': _cosine(matrices['prompt'], matrices['answer']),
+                    f'cos_assistant_answer_query_{prefix}': _cosine(
+                        matrices['assistant_query'], matrices['answer_prefix_query']),
+                }
+
+            def _bucket_indices(batch_index):
+                mask_b = log_mask[batch_index]
+                vis_idx = mask_b == 1
+                prompt_idx = mask_b == 2
+                answer_idx = mask_b == 3
+                if is_q_proj and assistant_query_mask is not None:
+                    assistant_idx = assistant_query_mask[batch_index].bool()
+                else:
+                    assistant_idx = torch.zeros_like(prompt_idx, dtype=torch.bool)
+                if is_q_proj and answer_prefix_query_mask is not None:
+                    answer_prefix_idx = answer_prefix_query_mask[batch_index].bool()
+                else:
+                    answer_prefix_idx = torch.zeros_like(prompt_idx, dtype=torch.bool)
+                return {
+                    'vis': vis_idx,
+                    'prompt': prompt_idx,
+                    'answer': answer_idx,
+                    'assistant_query': assistant_idx,
+                    'answer_prefix_query': answer_prefix_idx,
+                }
+
+            def _init_expert_rows():
+                rows = []
+                for expert_id in range(self.expert_num):
+                    rows.append({
+                        'expert': expert_id,
+                        'route_mean_prompt': 0.0,
+                        'route_mean_vis': 0.0,
+                        'route_mean_answer': 0.0,
+                        'route_mass_prompt': 0.0,
+                        'route_mass_vis': 0.0,
+                        'route_mass_answer': 0.0,
+                        'n_prompt': 0,
+                        'n_vis': 0,
+                        'n_answer': 0,
+                    })
+                return rows
+
+            def _route_expert_rows():
+                rows = _init_expert_rows()
+                route_cap = router.detach().to(device=lora_x.device)
+                for b in range(log_mask.shape[0]):
+                    idx = _bucket_indices(b)
+                    for bucket, route_name in (
+                        ('prompt', 'prompt'),
+                        ('vis', 'vis'),
+                        ('answer', 'answer'),
+                    ):
+                        token_idx = idx[bucket]
+                        n_tokens = int(token_idx.sum())
+                        if n_tokens == 0:
+                            continue
+                        route_mass = route_cap[b, token_idx].float().sum(dim=0)
+                        for expert_id in range(self.expert_num):
+                            rows[expert_id][f'route_mass_{route_name}'] += float(route_mass[expert_id].item())
+                            rows[expert_id][f'n_{route_name}'] += n_tokens
+                for row in rows:
+                    for route_name in ('prompt', 'vis', 'answer'):
+                        n_tokens = row[f'n_{route_name}']
+                        if n_tokens > 0:
+                            row[f'route_mean_{route_name}'] = row[f'route_mass_{route_name}'] / n_tokens
+                return rows
+
+            def _summarize_expert_matrices(prefix, matrices):
+                rows = []
+                for expert_id in range(self.expert_num):
+                    prompt = matrices['prompt'][expert_id]
+                    vis = matrices['vis'][expert_id]
+                    answer = matrices['answer'][expert_id]
+                    rows.append({
+                        'expert': expert_id,
+                        f'expert_grad_{prefix}_prompt': prompt.norm().item(),
+                        f'expert_grad_{prefix}_vis': vis.norm().item(),
+                        f'expert_grad_{prefix}_answer': answer.norm().item(),
+                        f'cos_{prefix}_prompt_vis': _cosine(prompt, vis),
+                        f'cos_{prefix}_answer_vis': _cosine(answer, vis),
+                        f'cos_{prefix}_prompt_answer': _cosine(prompt, answer),
+                    })
+                return rows
+
+            def _merge_expert_rows(base_rows, *updates):
+                rows = [dict(row) for row in base_rows]
+                for update_rows in updates:
+                    for update in update_rows:
+                        expert_id = int(update.get('expert', -1))
+                        if 0 <= expert_id < len(rows):
+                            rows[expert_id].update({k: v for k, v in update.items() if k != 'expert'})
+                return rows
+
+            def _summarize_expert_dw(g_lora_out, x_cap):
+                rows = []
+                route_cap = router.detach().to(device=lora_x.device)
+                d_out, d_in = B_shape[1], A_shape[2]
+                for expert_id in range(self.expert_num):
+                    matrices = {
+                        'prompt': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
+                        'vis': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
+                        'answer': torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device),
+                    }
+                    for b in range(log_mask.shape[0]):
+                        idx = _bucket_indices(b)
+                        for bucket in ('prompt', 'vis', 'answer'):
+                            token_idx = idx[bucket]
+                            if token_idx.any():
+                                weights = route_cap[b, token_idx, expert_id].to(dtype=A_dtype).unsqueeze(-1)
+                                weighted_grad = _stat_tensor(g_lora_out[b, token_idx], A_dtype) * weights
+                                matrices[bucket] += weighted_grad.T @ _stat_tensor(x_cap[b, token_idx], A_dtype)
+                    prompt = matrices['prompt']
+                    vis = matrices['vis']
+                    answer = matrices['answer']
+                    rows.append({
+                        'expert': expert_id,
+                        'expert_grad_dW_prompt': prompt.norm().item(),
+                        'expert_grad_dW_vis': vis.norm().item(),
+                        'expert_grad_dW_answer': answer.norm().item(),
+                        'cos_dW_prompt_vis': _cosine(prompt, vis),
+                        'cos_dW_answer_vis': _cosine(answer, vis),
+                        'cos_dW_prompt_answer': _cosine(prompt, answer),
+                    })
+                return rows
 
             out_A = torch.einsum('bti,nri->btnr', lora_x, A)  # (B,T,N,r_per)
             out_B = torch.einsum('btnr,nor->btno', out_A, B)   # (B,T,N,d_out)
@@ -451,24 +646,34 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 x_cap = x_ref[0]  # still alive; hook_A frees it later
                 d_out, d_in = B_shape[1], A_shape[2]
                 with torch.no_grad():
-                    G_t = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
-                    G_v = torch.zeros(d_out, d_in, dtype=A_dtype, device=A_device)
-                    n_text_total, n_vis_total = 0, 0
-                    for b in range(raw_mask.shape[0]):
-                        t_idx = (raw_mask[b] == 2)
-                        v_idx = (raw_mask[b] == 1)
-                        n_text_total += int(t_idx.sum())
-                        n_vis_total  += int(v_idx.sum())
-                        if t_idx.any():
-                            # (d_out, T_t) @ (T_t, d_in) → (d_out, d_in)
-                            G_t += _stat_tensor(g_lora_out[b, t_idx], A_dtype).T @ _stat_tensor(x_cap[b, t_idx], A_dtype)
-                        if v_idx.any():
-                            G_v += _stat_tensor(g_lora_out[b, v_idx], A_dtype).T @ _stat_tensor(x_cap[b, v_idx], A_dtype)
+                    matrices = _bucket_store((d_out, d_in), A_dtype)
+                    counts = {
+                        'n_vis': 0,
+                        'n_prompt': 0,
+                        'n_answer': 0,
+                        'n_assistant_query': 0,
+                        'n_answer_prefix_query': 0,
+                    }
+                    for b in range(log_mask.shape[0]):
+                        idx = _bucket_indices(b)
+                        counts['n_vis'] += int(idx['vis'].sum())
+                        counts['n_prompt'] += int(idx['prompt'].sum())
+                        counts['n_answer'] += int(idx['answer'].sum())
+                        counts['n_assistant_query'] += int(idx['assistant_query'].sum())
+                        counts['n_answer_prefix_query'] += int(idx['answer_prefix_query'].sum())
+                        for bucket, token_idx in idx.items():
+                            if token_idx.any():
+                                matrices[bucket] += (
+                                    _stat_tensor(g_lora_out[b, token_idx], A_dtype).T
+                                    @ _stat_tensor(x_cap[b, token_idx], A_dtype)
+                                )
                     logger_ref._pending_dw[(step, layer_name)] = {
-                        'g_tdW':  G_t.norm().item(),
-                        'g_vdW':  G_v.norm().item(),
-                        'n_text': n_text_total,
-                        'n_vis':  n_vis_total,
+                        'metrics': _summarize('dW', matrices),
+                        'counts': counts,
+                        'expert_rows': _merge_expert_rows(
+                            _route_expert_rows(),
+                            _summarize_expert_dw(g_lora_out, x_cap),
+                        ),
                     }
 
             # ── hook_B: exact W_B metric using out_A ──────────────────────────────
@@ -483,21 +688,19 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 if logger_ref is None:
                     return
                 with torch.no_grad():
-                    G_t_B = torch.zeros(B_shape, dtype=B_dtype, device=A_device)
-                    G_v_B = torch.zeros(B_shape, dtype=B_dtype, device=A_device)
-                    for b in range(raw_mask.shape[0]):
-                        t_idx = (raw_mask[b] == 2)
-                        v_idx = (raw_mask[b] == 1)
-                        if t_idx.any():
-                            # einsum: (T_t,N,d_out) × (T_t,N,r) → (N,d_out,r)
-                            G_t_B += torch.einsum(
-                                'tnd,tnr->ndr', _stat_tensor(g_out_B[b, t_idx], B_dtype), _stat_tensor(out_A_cap[b, t_idx], B_dtype))
-                        if v_idx.any():
-                            G_v_B += torch.einsum(
-                                'tnd,tnr->ndr', _stat_tensor(g_out_B[b, v_idx], B_dtype), _stat_tensor(out_A_cap[b, v_idx], B_dtype))
+                    matrices = _bucket_store(B_shape, B_dtype)
+                    for b in range(log_mask.shape[0]):
+                        idx = _bucket_indices(b)
+                        for bucket, token_idx in idx.items():
+                            if token_idx.any():
+                                matrices[bucket] += torch.einsum(
+                                    'tnd,tnr->ndr',
+                                    _stat_tensor(g_out_B[b, token_idx], B_dtype),
+                                    _stat_tensor(out_A_cap[b, token_idx], B_dtype),
+                                )
                     logger_ref._pending[(step, layer_name)] = {
-                        'g_tB': G_t_B.norm().item(),
-                        'g_vB': G_v_B.norm().item(),
+                        'metrics': _summarize('B', matrices),
+                        'expert_rows': _summarize_expert_matrices('B', matrices),
                     }
 
             # ── hook_A: exact W_A metric, all batch elements ──────────────────────
@@ -509,27 +712,34 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                 if logger_ref is None:
                     return
                 with torch.no_grad():
-                    G_t = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
-                    G_v = torch.zeros(A_shape, dtype=A_dtype, device=A_device)
-                    for b in range(raw_mask.shape[0]):
-                        t_idx = (raw_mask[b] == 2)
-                        v_idx = (raw_mask[b] == 1)
-                        if t_idx.any():
-                            G_t += torch.einsum(
-                                'tnr,td->nrd', _stat_tensor(g_out_A[b, t_idx], A_dtype), _stat_tensor(x_cap[b, t_idx], A_dtype))
-                        if v_idx.any():
-                            G_v += torch.einsum(
-                                'tnr,td->nrd', _stat_tensor(g_out_A[b, v_idx], A_dtype), _stat_tensor(x_cap[b, v_idx], A_dtype))
+                    matrices = _bucket_store(A_shape, A_dtype)
+                    for b in range(log_mask.shape[0]):
+                        idx = _bucket_indices(b)
+                        for bucket, token_idx in idx.items():
+                            if token_idx.any():
+                                matrices[bucket] += torch.einsum(
+                                    'tnr,td->nrd',
+                                    _stat_tensor(g_out_A[b, token_idx], A_dtype),
+                                    _stat_tensor(x_cap[b, token_idx], A_dtype),
+                                )
 
                     entry_B  = logger_ref._pending.pop((step, layer_name), {})
                     entry_dW = logger_ref._pending_dw.pop((step, layer_name), {})
+                    metrics = {}
+                    metrics.update(_summarize('A', matrices))
+                    metrics.update(entry_B.get('metrics', {}))
+                    metrics.update(entry_dW.get('metrics', {}))
+                    expert_rows = _merge_expert_rows(
+                        entry_dW.get('expert_rows', _init_expert_rows()),
+                        entry_B.get('expert_rows', []),
+                        _summarize_expert_matrices('A', matrices),
+                    )
                     logger_ref._flush(
                         step, layer_name,
-                        G_t.norm().item(), G_v.norm().item(),
-                        entry_B.get('g_tB',  0.0), entry_B.get('g_vB',  0.0),
-                        entry_dW.get('g_tdW', 0.0), entry_dW.get('g_vdW', 0.0),
-                        entry_dW.get('n_text', 0),  entry_dW.get('n_vis',  0),
+                        metrics,
+                        entry_dW.get('counts', {}),
                     )
+                    logger_ref._flush_expert(step, layer_name, expert_rows)
 
             lora_out = (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
 

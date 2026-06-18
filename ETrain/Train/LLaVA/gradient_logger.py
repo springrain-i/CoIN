@@ -1,18 +1,29 @@
 """
-ModalGradientLogger — records per-modality gradient contributions to MoELoRA parameters.
+ModalGradientLogger — records token-bucket gradient contributions to MoELoRA parameters.
 
 Three metrics per layer per logged step (all EXACT):
-  W_A:  G^t_A[n,r,d] = Σ_{b,t∈text} g_out_A[b,t,n,r] * lora_x[b,t,d]
-  W_B:  G^t_B[n,d,r] = Σ_{b,t∈text} g_out_B[b,t,n,d] * out_A[b,t,n,r]
-  ΔW:   G^t_dW[o,i]  = Σ_{b,t∈text} g_lora_out[b,t,o] * lora_x[b,t,i]   shape (d_out,d_in)
+  W_A:  G^bucket_A[n,r,d] = Σ_{b,t∈bucket} g_out_A[b,t,n,r] * lora_x[b,t,d]
+  W_B:  G^bucket_B[n,d,r] = Σ_{b,t∈bucket} g_out_B[b,t,n,d] * out_A[b,t,n,r]
+  ΔW:   G^bucket_dW[o,i]  = Σ_{b,t∈bucket} g_lora_out[b,t,o] * lora_x[b,t,i]
 
-R variants (text/visual ratio; >1 = text dominant):
-  R_A      = ||G^t_A||_F  / ||G^v_A||_F
-  R_B      = ||G^t_B||_F  / ||G^v_B||_F
-  R_dW     = ||G^t_dW||_F / ||G^v_dW||_F
-  R_A_tok  = (||G^t_A||_F  / n_text) / (||G^v_A||_F  / n_vis)   per-token normalised
-  R_B_tok  = (||G^t_B||_F  / n_text) / (||G^v_B||_F  / n_vis)
-  R_dW_tok = (||G^t_dW||_F / n_text) / (||G^v_dW||_F / n_vis)
+Buckets:
+  visual: token mask == 1
+  prompt: text token with label == IGNORE_INDEX
+  answer: text token with label != IGNORE_INDEX
+  assistant_query / answer_prefix_query: q_proj-only query-side buckets for
+  positions that predict answer tokens.
+
+Important interpretation:
+  G_* values are "aggregate update contribution" metrics: contributions from
+  all tokens in a bucket are summed into one parameter-shaped gradient matrix,
+  then its Frobenius norm is reported. They are not mean per-token gradient
+  activity metrics, because per-token norms are not computed before summing.
+
+Direction metrics:
+  cos_* fields flatten the bucket matrices above and compute cosine similarity,
+  following the gradient-direction diagnostic idea used in MMPareto/BalGrad.
+
+Expert-wise diagnostics are streamed separately as bucket x expert stats.
 """
 import csv
 import math
@@ -25,61 +36,84 @@ import torch
 import torch.nn as nn
 
 
+EXPERT_BUCKETS = ("prompt", "vis", "answer")
+EXPERT_METRIC_PREFIXES = ("A", "B", "dW")
+EXPERT_FIELDS = (
+    ["route_mean_prompt", "route_mean_vis", "route_mean_answer",
+     "route_mass_prompt", "route_mass_vis", "route_mass_answer",
+     "n_prompt", "n_vis", "n_answer"]
+    + [f"expert_grad_{prefix}_{bucket}"
+       for prefix in EXPERT_METRIC_PREFIXES
+       for bucket in EXPERT_BUCKETS]
+    + [f"cos_{prefix}_prompt_vis" for prefix in EXPERT_METRIC_PREFIXES]
+    + [f"cos_{prefix}_answer_vis" for prefix in EXPERT_METRIC_PREFIXES]
+    + [f"cos_{prefix}_prompt_answer" for prefix in EXPERT_METRIC_PREFIXES]
+)
+
+
 class _StepRecord:
-    __slots__ = (
-        'step', 'microbatch', 'layer',
-        'g_text_A', 'g_vis_A',
-        'g_text_B', 'g_vis_B',
-        'g_text_dW', 'g_vis_dW',
-        'n_text', 'n_vis',
-    )
+    __slots__ = ('step', 'microbatch', 'layer', 'metrics', 'counts')
 
-    def __init__(self, step, microbatch, layer,
-                 g_text_A, g_vis_A,
-                 g_text_B, g_vis_B,
-                 g_text_dW, g_vis_dW,
-                 n_text, n_vis):
-        self.step       = step
+    def __init__(self, step, microbatch, layer, metrics, counts):
+        self.step = step
         self.microbatch = microbatch
-        self.layer      = layer
-        self.g_text_A   = g_text_A
-        self.g_vis_A    = g_vis_A
-        self.g_text_B   = g_text_B
-        self.g_vis_B    = g_vis_B
-        self.g_text_dW  = g_text_dW
-        self.g_vis_dW   = g_vis_dW
-        self.n_text     = n_text
-        self.n_vis      = n_vis
+        self.layer = layer
+        self.metrics = metrics
+        self.counts = counts
+
+    def metric(self, name: str) -> float:
+        return float(self.metrics.get(name, 0.0))
+
+    def count(self, name: str) -> int:
+        return int(self.counts.get(name, 0))
 
     @property
-    def R_A(self):
-        return self.g_text_A / max(self.g_vis_A, 1e-8)
+    def g_prompt_A(self):
+        return self.metric("G_prompt_A")
 
     @property
-    def R_B(self):
-        return self.g_text_B / max(self.g_vis_B, 1e-8)
+    def g_vis_A(self):
+        return self.metric("G_vis_A")
 
     @property
-    def R_B_tok(self):
-        if self.n_text == 0 or self.n_vis == 0:
-            return float('inf')
-        return (self.g_text_B / self.n_text) / max(self.g_vis_B / self.n_vis, 1e-12)
+    def g_answer_A(self):
+        return self.metric("G_answer_A")
 
     @property
-    def R_dW(self):
-        return self.g_text_dW / max(self.g_vis_dW, 1e-8)
+    def g_prompt_B(self):
+        return self.metric("G_prompt_B")
 
     @property
-    def R_A_tok(self):
-        if self.n_text == 0 or self.n_vis == 0:
-            return float('inf')
-        return (self.g_text_A / self.n_text) / max(self.g_vis_A / self.n_vis, 1e-12)
+    def g_vis_B(self):
+        return self.metric("G_vis_B")
 
     @property
-    def R_dW_tok(self):
-        if self.n_text == 0 or self.n_vis == 0:
-            return float('inf')
-        return (self.g_text_dW / self.n_text) / max(self.g_vis_dW / self.n_vis, 1e-12)
+    def g_answer_B(self):
+        return self.metric("G_answer_B")
+
+    @property
+    def g_prompt_dW(self):
+        return self.metric("G_prompt_dW")
+
+    @property
+    def g_vis_dW(self):
+        return self.metric("G_vis_dW")
+
+    @property
+    def g_answer_dW(self):
+        return self.metric("G_answer_dW")
+
+    @property
+    def n_prompt(self):
+        return self.count("n_prompt")
+
+    @property
+    def n_vis(self):
+        return self.count("n_vis")
+
+    @property
+    def n_answer(self):
+        return self.count("n_answer")
 
 
 class ModalGradientLogger:
@@ -93,6 +127,28 @@ class ModalGradientLogger:
     Multi-GPU: each rank writes its own {task}_rank{N}_grad_stats.csv.
     Merge files downstream for combined analysis.
     """
+
+    METRIC_FIELDS = [
+        "G_prompt_A", "G_vis_A", "G_answer_A",
+        "G_assistant_query_A", "G_answer_prefix_query_A",
+        "G_prompt_B", "G_vis_B", "G_answer_B",
+        "G_assistant_query_B", "G_answer_prefix_query_B",
+        "G_prompt_dW", "G_vis_dW", "G_answer_dW",
+        "G_assistant_query_dW", "G_answer_prefix_query_dW",
+        "cos_prompt_vis_A", "cos_answer_vis_A", "cos_prompt_answer_A",
+        "cos_prompt_vis_B", "cos_answer_vis_B", "cos_prompt_answer_B",
+        "cos_prompt_vis_dW", "cos_answer_vis_dW", "cos_prompt_answer_dW",
+        "cos_assistant_answer_query_A", "cos_assistant_answer_query_B", "cos_assistant_answer_query_dW",
+    ]
+
+    COUNT_FIELDS = [
+        "n_prompt", "n_vis", "n_answer",
+        "n_assistant_query", "n_answer_prefix_query",
+    ]
+
+    EXPERT_BUCKETS = EXPERT_BUCKETS
+    EXPERT_METRIC_PREFIXES = EXPERT_METRIC_PREFIXES
+    EXPERT_FIELDS = EXPERT_FIELDS
 
     def __init__(
         self,
@@ -123,6 +179,9 @@ class ModalGradientLogger:
         self._stream_file: Optional[TextIO] = None
         self._stream_writer = None
         self._stream_path: Optional[str] = None
+        self._expert_stream_file: Optional[TextIO] = None
+        self._expert_stream_writer = None
+        self._expert_stream_path: Optional[str] = None
         self._microbatch_anchor_layer: Optional[str] = None
         self._active_step: Optional[int] = None
         self._microbatch_index = 0
@@ -265,6 +324,10 @@ class ModalGradientLogger:
         rank = self._rank()
         return os.path.join(self.output_dir, f"{task_name or self.task_name}_rank{rank}_grad_stats.csv")
 
+    def _expert_stats_path(self, task_name: Optional[str] = None) -> str:
+        rank = self._rank()
+        return os.path.join(self.output_dir, f"{task_name or self.task_name}_rank{rank}_expert_stats.csv")
+
     def _ensure_stream(self):
         if self._stream_writer is not None:
             return self._stream_writer
@@ -272,28 +335,23 @@ class ModalGradientLogger:
         self._stream_path = self._stats_path()
         self._stream_file = open(self._stream_path, "w", newline="")
         self._stream_writer = csv.writer(self._stream_file)
-        self._stream_writer.writerow([
-            "step", "microbatch", "layer",
-            "G_text_A", "G_vis_A", "R_A", "R_A_tok",
-            "G_text_B", "G_vis_B", "R_B", "R_B_tok",
-            "G_text_dW", "G_vis_dW", "R_dW", "R_dW_tok",
-            "n_text", "n_vis",
-        ])
+        self._stream_writer.writerow(
+            ["step", "microbatch", "layer"] + self.METRIC_FIELDS + self.COUNT_FIELDS
+        )
         self._stream_file.flush()
         return self._stream_writer
 
     def _write_record(self, record: _StepRecord) -> None:
         writer = self._ensure_stream()
-        writer.writerow([
-            record.step, record.microbatch, record.layer,
-            f"{record.g_text_A:.6f}",  f"{record.g_vis_A:.6f}",
-            f"{record.R_A:.4f}",       f"{record.R_A_tok:.4f}",
-            f"{record.g_text_B:.6f}",  f"{record.g_vis_B:.6f}",
-            f"{record.R_B:.4f}",       f"{record.R_B_tok:.4f}",
-            f"{record.g_text_dW:.6f}", f"{record.g_vis_dW:.6f}",
-            f"{record.R_dW:.4f}",      f"{record.R_dW_tok:.4f}",
-            record.n_text, record.n_vis,
-        ])
+        metric_values = []
+        for name in self.METRIC_FIELDS:
+            value = record.metric(name)
+            metric_values.append(f"{value:.6f}" if math.isfinite(value) else str(value))
+        writer.writerow(
+            [record.step, record.microbatch, record.layer]
+            + metric_values
+            + [record.count(name) for name in self.COUNT_FIELDS]
+        )
         if self._stream_file is not None:
             self._stream_file.flush()
 
@@ -303,6 +361,42 @@ class ModalGradientLogger:
             self._stream_file.close()
         self._stream_file = None
         self._stream_writer = None
+
+    def _ensure_expert_stream(self):
+        if self._expert_stream_writer is not None:
+            return self._expert_stream_writer
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._expert_stream_path = self._expert_stats_path()
+        self._expert_stream_file = open(self._expert_stream_path, "w", newline="")
+        self._expert_stream_writer = csv.writer(self._expert_stream_file)
+        self._expert_stream_writer.writerow(
+            ["step", "microbatch", "layer", "expert"] + self.EXPERT_FIELDS
+        )
+        self._expert_stream_file.flush()
+        return self._expert_stream_writer
+
+    def _write_expert_records(self, step: int, layer: str, expert_rows: List[dict]) -> None:
+        if not expert_rows:
+            return
+        writer = self._ensure_expert_stream()
+        for row in expert_rows:
+            values = []
+            for field in self.EXPERT_FIELDS:
+                value = row.get(field, 0.0)
+                if isinstance(value, int):
+                    values.append(value)
+                else:
+                    values.append(f"{float(value):.6f}" if math.isfinite(float(value)) else str(value))
+            writer.writerow([step, self._microbatch_index, layer, row.get("expert", -1)] + values)
+        if self._expert_stream_file is not None:
+            self._expert_stream_file.flush()
+
+    def _close_expert_stream(self) -> None:
+        if self._expert_stream_file is not None:
+            self._expert_stream_file.flush()
+            self._expert_stream_file.close()
+        self._expert_stream_file = None
+        self._expert_stream_writer = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -339,11 +433,7 @@ class ModalGradientLogger:
     def step_end(self) -> None:
         self.step += 1
 
-    def _flush(self, step, layer,
-               g_tA, g_vA,
-               g_tB, g_vB,
-               g_tdW, g_vdW,
-               n_text, n_vis) -> None:
+    def _flush(self, step, layer, metrics, counts) -> None:
         """Called by hook_A after all three hooks have fired."""
         if self.selected_steps is not None and step not in self.selected_steps:
             return
@@ -351,13 +441,17 @@ class ModalGradientLogger:
             return
         record = _StepRecord(
             step, self._microbatch_index, layer,
-            g_tA, g_vA,
-            g_tB, g_vB,
-            g_tdW, g_vdW,
-            n_text, n_vis,
+            metrics, counts,
         )
         self.records.append(record)
         self._write_record(record)
+
+    def _flush_expert(self, step, layer, expert_rows) -> None:
+        if self.selected_steps is not None and step not in self.selected_steps:
+            return
+        if self.selected_steps is None and step % self.log_every_n_steps != 0:
+            return
+        self._write_expert_records(step, layer, expert_rows)
 
     def save_csv(self, task_name: str) -> str:
         os.makedirs(self.output_dir, exist_ok=True)
@@ -366,108 +460,59 @@ class ModalGradientLogger:
         if self._stream_writer is None and not os.path.exists(path):
             self._ensure_stream()
         self._close_stream()
+        self._close_expert_stream()
         self._save_summary_csv(task_name, rank)
         self._print_summary(task_name)
         print(f"[GradLogger] rank{rank} streamed {len(self.records)} records -> {path}")
+        if self._expert_stream_path is not None:
+            print(f"[GradLogger] rank{rank} streamed expert records -> {self._expert_stream_path}")
         return path
 
     def _save_summary_csv(self, task_name: str, rank: int) -> None:
-        """Write per-layer and global summary CSV alongside the main stats file.
-
-        Summary rows are computed from raw G values (not R), so the ratio is
-        derived from mean(G_text)/mean(G_vis) — consistent with multi-rank merging.
-        """
+        """Write per-layer and global mean summaries for every streamed field."""
         if not self.records:
             return
 
-        # Collect per-layer raw G values
         from collections import defaultdict
-        layer_data: dict = defaultdict(lambda: {
-            'G_text_A': [], 'G_vis_A': [],
-            'G_text_B': [], 'G_vis_B': [],
-            'G_text_dW': [], 'G_vis_dW': [],
-            'n_text': [], 'n_vis': [],
-        })
-        for r in self.records:
-            d = layer_data[r.layer]
-            d['G_text_A'].append(r.g_text_A);  d['G_vis_A'].append(r.g_vis_A)
-            d['G_text_B'].append(r.g_text_B);  d['G_vis_B'].append(r.g_vis_B)
-            d['G_text_dW'].append(r.g_text_dW); d['G_vis_dW'].append(r.g_vis_dW)
-            d['n_text'].append(r.n_text);       d['n_vis'].append(r.n_vis)
+        layer_data: dict = defaultdict(list)
+        for record in self.records:
+            layer_data[record.layer].append(record)
 
-        def _ratio(t_vals, v_vals):
-            mt = statistics.mean(t_vals)
-            mv = statistics.mean(v_vals)
-            return mt / max(mv, 1e-8)
+        def _mean_metric(records: List[_StepRecord], field: str) -> float:
+            values = [record.metric(field) for record in records]
+            finite_values = [value for value in values if math.isfinite(value)]
+            if not finite_values:
+                return float("inf")
+            return statistics.mean(finite_values)
 
-        def _ratio_tok(t_vals, v_vals, nt_vals, nv_vals):
-            pairs = [(t/max(nt,1), v/max(nv,1))
-                     for t, v, nt, nv in zip(t_vals, v_vals, nt_vals, nv_vals)
-                     if nt > 0 and nv > 0 and v > 1e-8]
-            if not pairs:
-                return float('inf')
-            return statistics.mean(t/max(v,1e-12) for t,v in pairs)
+        def _mean_count(records: List[_StepRecord], field: str) -> float:
+            return statistics.mean([record.count(field) for record in records])
 
         summary_path = os.path.join(
             self.output_dir, f"{task_name}_rank{rank}_summary.csv")
         with open(summary_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow([
-                "scope", "layer",
-                "mean_G_text_A", "mean_G_vis_A", "R_A", "R_A_tok",
-                "mean_G_text_B", "mean_G_vis_B", "R_B", "R_B_tok",
-                "mean_G_text_dW", "mean_G_vis_dW", "R_dW", "R_dW_tok",
-                "n_steps",
-            ])
-            # Per-layer rows
-            all_Gt_A, all_Gv_A = [], []
-            all_Gt_B, all_Gv_B = [], []
-            all_Gt_dW, all_Gv_dW = [], []
-            all_nt, all_nv = [], []
-            for layer, d in sorted(layer_data.items()):
-                n = len(d['G_text_A'])
-                mt_A  = statistics.mean(d['G_text_A']);  mv_A  = statistics.mean(d['G_vis_A'])
-                mt_B  = statistics.mean(d['G_text_B']);  mv_B  = statistics.mean(d['G_vis_B'])
-                mt_dW = statistics.mean(d['G_text_dW']); mv_dW = statistics.mean(d['G_vis_dW'])
-                R_A    = mt_A  / max(mv_A,  1e-8)
-                R_B    = mt_B  / max(mv_B,  1e-8)
-                R_dW   = mt_dW / max(mv_dW, 1e-8)
-                R_Atk  = _ratio_tok(d['G_text_A'],  d['G_vis_A'],  d['n_text'], d['n_vis'])
-                R_Btk  = _ratio_tok(d['G_text_B'],  d['G_vis_B'],  d['n_text'], d['n_vis'])
-                R_dWtk = _ratio_tok(d['G_text_dW'], d['G_vis_dW'], d['n_text'], d['n_vis'])
-                w.writerow([
-                    "layer", layer,
-                    f"{mt_A:.6f}", f"{mv_A:.6f}", f"{R_A:.4f}", f"{R_Atk:.4f}",
-                    f"{mt_B:.6f}", f"{mv_B:.6f}", f"{R_B:.4f}", f"{R_Btk:.4f}",
-                    f"{mt_dW:.6f}", f"{mv_dW:.6f}", f"{R_dW:.4f}", f"{R_dWtk:.4f}",
-                    n,
-                ])
-                all_Gt_A.extend(d['G_text_A']);  all_Gv_A.extend(d['G_vis_A'])
-                all_Gt_B.extend(d['G_text_B']);  all_Gv_B.extend(d['G_vis_B'])
-                all_Gt_dW.extend(d['G_text_dW']); all_Gv_dW.extend(d['G_vis_dW'])
-                all_nt.extend(d['n_text']);       all_nv.extend(d['n_vis'])
-
-            # Global summary row
-            gmt_A  = statistics.mean(all_Gt_A);  gmv_A  = statistics.mean(all_Gv_A)
-            gmt_B  = statistics.mean(all_Gt_B);  gmv_B  = statistics.mean(all_Gv_B)
-            gmt_dW = statistics.mean(all_Gt_dW); gmv_dW = statistics.mean(all_Gv_dW)
-            gR_A    = gmt_A  / max(gmv_A,  1e-8)
-            gR_B    = gmt_B  / max(gmv_B,  1e-8)
-            gR_dW   = gmt_dW / max(gmv_dW, 1e-8)
-            gR_Atk  = _ratio_tok(all_Gt_A,  all_Gv_A,  all_nt, all_nv)
-            gR_Btk  = _ratio_tok(all_Gt_B,  all_Gv_B,  all_nt, all_nv)
-            gR_dWtk = _ratio_tok(all_Gt_dW, all_Gv_dW, all_nt, all_nv)
-            w.writerow([
-                "global", "ALL",
-                f"{gmt_A:.6f}", f"{gmv_A:.6f}", f"{gR_A:.4f}", f"{gR_Atk:.4f}",
-                f"{gmt_B:.6f}", f"{gmv_B:.6f}", f"{gR_B:.4f}", f"{gR_Btk:.4f}",
-                f"{gmt_dW:.6f}", f"{gmv_dW:.6f}", f"{gR_dW:.4f}", f"{gR_dWtk:.4f}",
-                len(self.records),
-            ])
-        print(f"[GradLogger] rank{rank} summary → {summary_path}")
+            w.writerow(
+                ["scope", "layer", "n_records"]
+                + [f"mean_{field}" for field in self.METRIC_FIELDS]
+                + [f"mean_{field}" for field in self.COUNT_FIELDS]
+            )
+            for layer, records in sorted(layer_data.items()):
+                w.writerow(
+                    ["layer", layer, len(records)]
+                    + [f"{_mean_metric(records, field):.6f}" for field in self.METRIC_FIELDS]
+                    + [f"{_mean_count(records, field):.2f}" for field in self.COUNT_FIELDS]
+                )
+            w.writerow(
+                ["global", "ALL", len(self.records)]
+                + [f"{_mean_metric(self.records, field):.6f}" for field in self.METRIC_FIELDS]
+                + [f"{_mean_count(self.records, field):.2f}" for field in self.COUNT_FIELDS]
+            )
+        print(f"[GradLogger] rank{rank} summary -> {summary_path}")
 
     def clear_records(self) -> None:
         self._close_stream()
+        self._close_expert_stream()
         self.records.clear()
         self._pending.clear()
         self._pending_dw.clear()
@@ -482,6 +527,7 @@ class ModalGradientLogger:
         except ImportError:
             return
         self._close_stream()
+        self._close_expert_stream()
         for module in model.modules():
             if isinstance(module, CoINMOELoraLinear):
                 module._log_gradients = False
@@ -493,15 +539,17 @@ class ModalGradientLogger:
     def _print_summary(self, task_name: str) -> None:
         if not self.records:
             return
-        valid_A    = [r.R_A     for r in self.records if r.g_vis_A  > 1e-6]
-        valid_B    = [r.R_B     for r in self.records if r.g_vis_B  > 1e-6]
-        valid_dW   = [r.R_dW    for r in self.records if r.g_vis_dW > 1e-6]
-        valid_Atk  = [r.R_A_tok   for r in self.records
-                      if r.n_vis > 0 and r.g_vis_A  > 1e-6 and r.R_A_tok  < 1e6]
-        valid_Btk  = [r.R_B_tok   for r in self.records
-                      if r.n_vis > 0 and r.g_vis_B  > 1e-6 and r.R_B_tok  < 1e6]
-        valid_dWtk = [r.R_dW_tok  for r in self.records
-                      if r.n_vis > 0 and r.g_vis_dW > 1e-6 and r.R_dW_tok < 1e6]
+        fields = [
+            ("G_prompt_A", "prompt_A:"),
+            ("G_vis_A", "visual_A:"),
+            ("G_answer_A", "answer_A:"),
+            ("G_prompt_B", "prompt_B:"),
+            ("G_vis_B", "visual_B:"),
+            ("G_answer_B", "answer_B:"),
+            ("G_prompt_dW", "prompt_dW:"),
+            ("G_vis_dW", "visual_dW:"),
+            ("G_answer_dW", "answer_dW:"),
+        ]
 
         def _fmt(vals, label):
             if not vals:
@@ -511,9 +559,5 @@ class ModalGradientLogger:
                   f"median={statistics.median(vals):.3f}  "
                   f"n={len(vals)}")
 
-        _fmt(valid_A,    "R_A:")
-        _fmt(valid_B,    "R_B:")
-        _fmt(valid_dW,   "R_dW:")
-        _fmt(valid_Atk,  "R_A/tok:")
-        _fmt(valid_Btk,  "R_B/tok:")
-        _fmt(valid_dWtk, "R_dW/tok:")
+        for field, label in fields:
+            _fmt([r.metric(field) for r in self.records], label)

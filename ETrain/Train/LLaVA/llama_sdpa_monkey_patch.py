@@ -142,6 +142,10 @@ def forward_sdpa(
     ):
         logger_ref = getattr(self, '_attn_logger', None)
         token_mask = self._attn_token_mask
+        grad_token_mask = getattr(self, '_attn_grad_token_mask', token_mask)
+        answer_query_mask = getattr(self, '_attn_answer_query_mask', None)
+        assistant_query_mask = getattr(self, '_attn_assistant_query_mask', None)
+        answer_prefix_query_mask = getattr(self, '_attn_answer_prefix_query_mask', None)
         step       = logger_ref.current_step if logger_ref is not None else 0
         layer_name = getattr(self, '_attn_layer_name', 'unknown')
         if logger_ref is not None and logger_ref.should_log_record(layer_name):
@@ -159,6 +163,10 @@ def forward_sdpa(
                 w = torch.softmax(logits.float(), dim=-1).to(query_states.dtype)
                 logger_ref._record(
                     step, layer_name, w, token_mask,
+                    grad_token_mask,
+                    answer_query_mask,
+                    assistant_query_mask,
+                    answer_prefix_query_mask,
                     value_states, self.o_proj.weight,
                 )
                 del w, logits  # free immediately

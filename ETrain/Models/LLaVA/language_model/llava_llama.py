@@ -131,6 +131,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
     def _apply_lora_token_mask(self):
         #print("Applying LoRA token mask...")
         token_mask = getattr(self, "current_lora_mask", None)
+        grad_token_mask = getattr(self, "current_grad_token_mask", token_mask)
+        answer_query_mask = getattr(self, "current_answer_query_mask", None)
+        assistant_query_mask = getattr(self, "current_assistant_query_mask", None)
+        answer_prefix_query_mask = getattr(self, "current_answer_prefix_query_mask", None)
         lora_mode = getattr(self, "lora_mode", "all")
         # # 用于看是否成功提取token_mask
         # if not hasattr(self, "_lora_mask_debugged"):
@@ -146,6 +150,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         for module in self.model.modules():
             if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
                 module.token_mask = token_mask
+                module.grad_token_mask = grad_token_mask
+                module.answer_query_mask = answer_query_mask
+                module.assistant_query_mask = assistant_query_mask
+                module.answer_prefix_query_mask = answer_prefix_query_mask
                 module.lora_mode = lora_mode
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
