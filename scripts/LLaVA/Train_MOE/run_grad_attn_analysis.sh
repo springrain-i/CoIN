@@ -29,13 +29,15 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512
 COIN_USE_DEEPSPEED="${COIN_USE_DEEPSPEED:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COIN_EXPERIMENT_NAME="${COIN_EXPERIMENT_NAME:-grad_attn_expert}"
+COIN_OUTPUT_ROOT="${COIN_OUTPUT_ROOT:-/hy-tmp/CoIN/checkpoints/LLaVA/${COIN_EXPERIMENT_NAME}}"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/coin_paths.sh"
 
-GRAD_OUT_DIR="${GRAD_OUT_DIR:-${COIN_REPO_ROOT}/analysis/gradient_dominance}"
-ATTN_OUT_DIR="${ATTN_OUT_DIR:-${COIN_REPO_ROOT}/analysis/attn_dominance}"
-LOG_DIR="${LOG_DIR:-${COIN_REPO_ROOT}/logs/LLaVA/grad_attn_analysis}"
-mkdir -p "${GRAD_OUT_DIR}" "${ATTN_OUT_DIR}" "${LOG_DIR}" "${COIN_OUTPUT_ROOT}"
+GRAD_OUT_ROOT="${GRAD_OUT_ROOT:-${GRAD_OUT_DIR:-${COIN_REPO_ROOT}/analysis/gradient_dominance}}"
+ATTN_OUT_ROOT="${ATTN_OUT_ROOT:-${ATTN_OUT_DIR:-${COIN_REPO_ROOT}/analysis/attn_dominance}}"
+LOG_ROOT="${LOG_ROOT:-${LOG_DIR:-${COIN_REPO_ROOT}/logs/LLaVA/${COIN_EXPERIMENT_NAME}}}"
+mkdir -p "${GRAD_OUT_ROOT}" "${ATTN_OUT_ROOT}" "${LOG_ROOT}" "${COIN_OUTPUT_ROOT}"
 
 TASK_NAMES=("" "ScienceQA" "TextVQA" "ImageNet" "GQA" "VizWiz" "Grounding" "VQAv2" "OCRVQA")
 TASK_DATA=(
@@ -106,10 +108,15 @@ wait_for_path() {
 run_task() {
   local k=$1
   local task_name="${TASK_NAMES[$k]}"
+  local task_id="T${k}_${task_name}"
   local data_path="${TASK_DATA[$k]}"
   local image_gate="${TASK_IMAGE_GATES[$k]}"
-  local output_dir="${COIN_OUTPUT_ROOT}/${CKPT_NAMES[$k]}"
-  local log_file="${LOG_DIR}/task${k}_${task_name}.log"
+  local task_grad_out_dir="${GRAD_OUT_ROOT}/${task_id}"
+  local task_attn_out_dir="${ATTN_OUT_ROOT}/${task_id}"
+  local task_log_dir="${LOG_ROOT}/${task_id}"
+  local task_output_root="${COIN_OUTPUT_ROOT}/${task_id}"
+  local output_dir="${task_output_root}/${CKPT_NAMES[$k]}"
+  local log_file="${task_log_dir}/task${k}_${task_name}.log"
   local target_effective_bs="${TASK_EFFECTIVE_BS[$k]}"
   local train_bs="${COIN_TRAIN_BS:-${TASK_TRAIN_BS[$k]}}"
   local grad_accum="${COIN_GRAD_ACCUM:-}"
@@ -136,6 +143,7 @@ run_task() {
     max_steps_arg=(--max_steps "${COIN_MAX_STEPS}")
   fi
   local prev_ckpt_arg=()
+  mkdir -p "${task_grad_out_dir}" "${task_attn_out_dir}" "${task_log_dir}" "${task_output_root}"
 
   echo "============================================================"
   echo "Task ${k}/8: ${task_name}"
@@ -157,11 +165,14 @@ run_task() {
   echo "Max steps: ${COIN_MAX_STEPS:-full epoch}"
   echo "Output: ${output_dir}"
   echo "Log: ${log_file}"
+  echo "Grad CSV dir: ${task_grad_out_dir}"
+  echo "Attn CSV dir: ${task_attn_out_dir}"
   echo "============================================================"
 
   if [[ "$k" -gt 1 ]]; then
     local prev_k=$((k - 1))
-    local prev_ckpt="${COIN_OUTPUT_ROOT}/${CKPT_NAMES[$prev_k]}"
+    local prev_task_id="T${prev_k}_${TASK_NAMES[$prev_k]}"
+    local prev_ckpt="${COIN_OUTPUT_ROOT}/${prev_task_id}/${CKPT_NAMES[$prev_k]}"
     prev_ckpt_arg=(--previous_task_model_path "${prev_ckpt}")
   fi
 
@@ -222,9 +233,9 @@ run_task() {
     --grad_layer_blocks "${grad_layer_blocks}"
     --grad_accum_steps "${grad_accum}"
     --grad_microbatch_sample "${grad_microbatch_sample}"
-    --grad_task_name "T${k}_${task_name}"
-    --grad_output_dir "${GRAD_OUT_DIR}"
-    --attn_output_dir "${ATTN_OUT_DIR}"
+    --grad_task_name "${task_id}"
+    --grad_output_dir "${task_grad_out_dir}"
+    --attn_output_dir "${task_attn_out_dir}"
     --grad_log_interval 1
   )
 
@@ -261,13 +272,16 @@ echo "Projector: ${COIN_PRETRAIN_PROJECTOR}"
 echo "Instruction root: ${COIN_INSTR_ROOT}"
 echo "Image root: ${COIN_IMAGE_ROOT}"
 echo "Output root: ${COIN_OUTPUT_ROOT}"
+echo "Log root: ${LOG_ROOT}"
+echo "Grad root: ${GRAD_OUT_ROOT}"
+echo "Attn root: ${ATTN_OUT_ROOT}"
 
 for k in $(seq "$START_TASK" "$END_TASK"); do
   run_task "$k"
 done
 
 echo "All requested tasks complete."
-echo "Grad CSV dir: ${GRAD_OUT_DIR}"
-echo "Attn CSV dir: ${ATTN_OUT_DIR}"
-ls -lh "${GRAD_OUT_DIR}"/*.csv 2>/dev/null || echo "(no grad CSV yet)"
-ls -lh "${ATTN_OUT_DIR}"/*.csv 2>/dev/null || echo "(no attn CSV yet)"
+echo "Grad root: ${GRAD_OUT_ROOT}"
+echo "Attn root: ${ATTN_OUT_ROOT}"
+find "${GRAD_OUT_ROOT}" -maxdepth 2 -type f -name "*.csv" -printf "%p %s bytes\n" 2>/dev/null || echo "(no grad CSV yet)"
+find "${ATTN_OUT_ROOT}" -maxdepth 2 -type f -name "*.csv" -printf "%p %s bytes\n" 2>/dev/null || echo "(no attn CSV yet)"
