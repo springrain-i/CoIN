@@ -111,13 +111,23 @@ class LlavaMetaForCausalLM(ABC):
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             if attention_mask is None:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+            # token mask: 1=visual, 2=non-answer text, 3=answer/generated token.
+            # Autoregressive decode steps pass only the newly generated token through LoRA;
+            # mark that token as answer/generated so vision-only decoding can still use LoRA.
             self.current_lora_mask = attention_mask.to(dtype=torch.long) * 2
+            if input_ids.shape[1] == 1 and past_key_values is not None:
+                self.current_lora_mask = attention_mask.to(dtype=torch.long) * 3
+            elif labels is not None and labels.shape == self.current_lora_mask.shape:
+                answer_mask = labels.ne(IGNORE_INDEX) & attention_mask.bool()
+                self.current_lora_mask = self.current_lora_mask.masked_fill(answer_mask, 3)
             if not hasattr(self, "_lora_token_stats"):
-                self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
+                self._lora_token_stats = {"text": 0, "vision": 0, "answer": 0, "pad": 0, "nonpad": 0, "batches": 0}
             mask = self.current_lora_mask
             # Skip counting for generation steps (seq_len=1) to avoid including new tokens.
             if input_ids.shape[1] != 1:
+                self._lora_token_stats.setdefault("answer", 0)
                 self._lora_token_stats["text"] += int((mask == 2).sum().item())
+                self._lora_token_stats["answer"] += int((mask == 3).sum().item())
                 self._lora_token_stats["vision"] += int((mask == 1).sum().item())
                 self._lora_token_stats["pad"] += int((mask == 0).sum().item())
                 self._lora_token_stats["nonpad"] += int((mask > 0).sum().item())
@@ -174,12 +184,15 @@ class LlavaMetaForCausalLM(ABC):
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
-                new_token_masks.append(torch.full(
+                cur_token_mask = torch.full(
                     (cur_input_embeds.shape[0],),
                     2,
                     device=cur_input_embeds.device,
                     dtype=torch.long,
-                ))
+                )
+                cur_answer_mask = labels[batch_idx].ne(IGNORE_INDEX)
+                cur_token_mask = cur_token_mask.masked_fill(cur_answer_mask, 3)
+                new_token_masks.append(cur_token_mask)
                 cur_image_idx += 1
                 continue
 
@@ -200,12 +213,15 @@ class LlavaMetaForCausalLM(ABC):
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
-                cur_new_token_mask.append(torch.full(
+                cur_text_mask = torch.full(
                     (cur_input_embeds_no_im[i].shape[0],),
                     2,
                     device=cur_input_embeds_no_im[i].device,
                     dtype=torch.long,
-                ))
+                )
+                cur_answer_mask = cur_labels_noim[i].ne(IGNORE_INDEX)
+                cur_text_mask = cur_text_mask.masked_fill(cur_answer_mask, 3)
+                cur_new_token_mask.append(cur_text_mask)
                 if i < num_images:
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
@@ -231,6 +247,7 @@ class LlavaMetaForCausalLM(ABC):
         if tokenizer_model_max_length is not None:
             new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
             new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
+            new_token_masks = [x[:tokenizer_model_max_length] for x in new_token_masks]
 
         # Combine them
         max_len = max(x.shape[0] for x in new_input_embeds)
@@ -282,9 +299,11 @@ class LlavaMetaForCausalLM(ABC):
 
         self.current_lora_mask = new_token_mask_padded
         if not hasattr(self, "_lora_token_stats"):
-            self._lora_token_stats = {"text": 0, "vision": 0, "pad": 0, "nonpad": 0, "batches": 0}
+            self._lora_token_stats = {"text": 0, "vision": 0, "answer": 0, "pad": 0, "nonpad": 0, "batches": 0}
         mask = self.current_lora_mask
+        self._lora_token_stats.setdefault("answer", 0)
         self._lora_token_stats["text"] += int((mask == 2).sum().item())
+        self._lora_token_stats["answer"] += int((mask == 3).sum().item())
         self._lora_token_stats["vision"] += int((mask == 1).sum().item())
         self._lora_token_stats["pad"] += int((mask == 0).sum().item())
         self._lora_token_stats["nonpad"] += int((mask > 0).sum().item())

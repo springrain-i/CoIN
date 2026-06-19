@@ -26,7 +26,9 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
-export CUDA_VISIBLE_DEVICES=0,1,2,5,6,7
+BATCH_SIZE="${COIN_EVAL_BATCH_SIZE:-1}"
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
@@ -36,8 +38,6 @@ BASE_MODEL_PATH='/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/Vicuna/vicuna-
 VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-large-patch14-336"
 
 RESULT_DIR="./results/CoIN/LLaVA/Final_MOE_only_vision"
-
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"  # batch=4: ~2.5x speedup on 24GB GPU
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_text_vqa \
@@ -51,9 +51,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
-        --max_new_tokens 40 \
-        --conv-mode vicuna_v1 \
-        --batch-size "${EVAL_BATCH_SIZE}" &
+        --batch-size $BATCH_SIZE \
+        --conv-mode vicuna_v1 &
 done
 # 三个选项: all, text, vision
 wait

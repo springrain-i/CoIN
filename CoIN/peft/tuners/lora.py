@@ -685,9 +685,10 @@ class LoraLayer:
             mask = token_mask
         else:
             if lora_mode == "text":
-                mask = token_mask == 2
+                # mask==3: answer/generated tokens, always active in all modes
+                mask = (token_mask == 2) | (token_mask == 3)
             elif lora_mode == "vision":
-                mask = token_mask == 1
+                mask = (token_mask == 1) | (token_mask == 3)
             else:
                 mask = token_mask > 0
 

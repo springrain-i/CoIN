@@ -25,7 +25,9 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
-export CUDA_VISIBLE_DEVICES=0,1,2,5,6,7
+BATCH_SIZE="${COIN_EVAL_BATCH_SIZE:-1}"
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 
@@ -37,8 +39,6 @@ VISION_TOWER_PATH="/data4/wxl/MoBLoRA-backup/CoIN/checkpoints/LLaVA/clip-vit-lar
 
 RESULT_DIR="./results/CoIN/LLaVA/ScienceQA_NoMerge_Visual"
 #RESULT_DIR="./results/CoIN/LLaVA/ScienceQA_modified"
-
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-4}"  # batch=4: 2.57x speedup vs batch=1 on 24GB GPU
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ETrain.Eval.LLaVA.CoIN.model_vqa_science \
@@ -52,9 +52,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
-        --max_new_tokens 10 \
-        --conv-mode vicuna_v1 \
-        --batch-size "${EVAL_BATCH_SIZE}" &
+        --batch-size $BATCH_SIZE \
+        --conv-mode vicuna_v1 &
 done
 #lora-mode的三个选项: all, text, visual
 wait
