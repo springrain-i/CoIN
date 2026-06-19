@@ -19,6 +19,11 @@ require the SDPA patch's manual recompute path).
 import sys
 import os
 
+# Make step/loss logs visible through tee while long tasks are still running.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(line_buffering=True, write_through=True)
+
 # ── sys.path: repo-local ETrain takes precedence over editable install ────────
 _repo_root = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
