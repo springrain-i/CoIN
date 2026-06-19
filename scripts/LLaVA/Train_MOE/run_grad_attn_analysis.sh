@@ -22,6 +22,7 @@ fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export COIN_USE_SDPA_PATCH="${COIN_USE_SDPA_PATCH:-1}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512}"
 
 # Single A100 default: avoid ZeRO offload overhead. If this OOMs, rerun with
@@ -245,7 +246,7 @@ run_task() {
       printf ' deepspeed --include %q --master_port 29610 %q --deepspeed %q' "${COIN_DS_INCLUDE}" "${train_args[0]}" "${COIN_DS_CONFIG}"
       printf ' %q' "${train_args[@]:1}"
     else
-      printf ' python'
+      printf ' python -u'
       printf ' %q' "${train_args[@]}"
     fi
     printf '\n'
@@ -258,7 +259,7 @@ run_task() {
       "${train_args[0]}" --deepspeed "${COIN_DS_CONFIG}" "${train_args[@]:1}" \
       2>&1 | tee "${log_file}"
   else
-    python "${train_args[@]}" 2>&1 | tee "${log_file}"
+    python -u "${train_args[@]}" 2>&1 | tee "${log_file}"
   fi
 
   echo "[run_grad_attn_analysis] Task ${k} done."
