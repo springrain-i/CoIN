@@ -431,6 +431,7 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             answer_prefix_query_mask = getattr(self, 'answer_prefix_query_mask', None)
             is_q_proj = layer_name.endswith('q_proj') or '.q_proj' in layer_name
             step = logger_ref.current_step
+            log_effective_dw = bool(getattr(logger_ref, 'log_effective_dw', True))
 
             A_shape, A_dtype, A_device = A.shape, A.dtype, A.device
             # B shape for G_B zero tensor: (N, d_out, r_per); infer from B itself
@@ -609,7 +610,7 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
             # G^t shape (d_out, d_in) = (4096, 4096) ≈ 33MB bf16 — acceptable on 8×24GB
             def hook_lora_out(g_lora_out):
                 # g_lora_out: (B, T, d_out)
-                if logger_ref is None:
+                if logger_ref is None or not log_effective_dw:
                     return
                 x_cap = x_ref[0]  # still alive; hook_A frees it later
                 d_out, d_in = B_shape[1], A_shape[2]
@@ -689,26 +690,44 @@ class CoINMOELoraLinear(nn.Linear, CoINMOELoraLayer):
                                 )
 
                     entry_B  = logger_ref._pending.pop((step, layer_name), {})
-                    entry_dW = logger_ref._pending_dw.pop((step, layer_name), {})
+                    entry_dW = logger_ref._pending_dw.pop((step, layer_name), {}) if log_effective_dw else {}
                     metrics = {}
                     metrics.update(_summarize('A', matrices))
                     metrics.update(entry_B.get('metrics', {}))
-                    metrics.update(entry_dW.get('metrics', {}))
+                    if log_effective_dw:
+                        metrics.update(entry_dW.get('metrics', {}))
+
+                    counts = {
+                        'n_vis': 0,
+                        'n_prompt': 0,
+                        'n_answer': 0,
+                        'n_assistant_query': 0,
+                        'n_answer_prefix_query': 0,
+                    }
+                    for b in range(log_mask.shape[0]):
+                        idx = _bucket_indices(b)
+                        counts['n_vis'] += int(idx['vis'].sum())
+                        counts['n_prompt'] += int(idx['prompt'].sum())
+                        counts['n_answer'] += int(idx['answer'].sum())
+                        counts['n_assistant_query'] += int(idx['assistant_query'].sum())
+                        counts['n_answer_prefix_query'] += int(idx['answer_prefix_query'].sum())
+
+                    route_rows = entry_dW.get('expert_rows') if log_effective_dw else _route_expert_rows()
                     expert_rows = _merge_expert_rows(
-                        entry_dW.get('expert_rows', _init_expert_rows()),
+                        route_rows or _init_expert_rows(),
                         entry_B.get('expert_rows', []),
                         _summarize_expert_matrices('A', matrices),
                     )
                     logger_ref._flush(
                         step, layer_name,
                         metrics,
-                        entry_dW.get('counts', {}),
+                        entry_dW.get('counts', counts) if log_effective_dw else counts,
                     )
                     logger_ref._flush_expert(step, layer_name, expert_rows)
 
             lora_out = (out_B * router.unsqueeze(-1)).sum(dim=2) * self.scaling[active]
 
-            if lora_out.requires_grad:
+            if log_effective_dw and lora_out.requires_grad:
                 lora_out.register_hook(hook_lora_out)
             if out_B.requires_grad:
                 out_B.register_hook(hook_B)

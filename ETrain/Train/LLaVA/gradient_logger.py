@@ -163,6 +163,7 @@ class ModalGradientLogger:
         grad_accum_steps: Optional[int] = None,
         microbatch_sample: Optional[str] = "0.25",
         task_name: str = "task_unknown",
+        log_effective_dw: bool = True,
     ):
         self.log_every_n_steps = max(int(log_every_n_steps), 1)
         self.output_dir = output_dir
@@ -174,6 +175,7 @@ class ModalGradientLogger:
         self.layer_blocks = self._parse_layer_blocks(layer_blocks)
         self.grad_accum_steps = int(grad_accum_steps) if grad_accum_steps not in (None, "") else None
         self.microbatch_sample = microbatch_sample
+        self.log_effective_dw = bool(log_effective_dw)
         self.selected_microbatches = self._build_microbatch_schedule(
             self.grad_accum_steps, microbatch_sample)
         self.records: List[_StepRecord] = []
@@ -430,8 +432,9 @@ class ModalGradientLogger:
                       f"blocks {sorted(self.layer_blocks)}")
         mb_desc = ("unknown micro-batches" if self.selected_microbatches is None else
                    f"{len(self.selected_microbatches)}/{self.grad_accum_steps} micro-batches {sorted(self.selected_microbatches)}")
+        dw_desc = "effective ΔW enabled" if self.log_effective_dw else "effective ΔW disabled"
         print(f"[GradLogger] attached to {count} CoINMOELoraLinear layers "
-              f"({skipped} skipped; {layer_desc}; {schedule_desc}; {mb_desc})")
+              f"({skipped} skipped; {layer_desc}; {schedule_desc}; {mb_desc}; {dw_desc})")
 
     def step_end(self) -> None:
         self.step += 1

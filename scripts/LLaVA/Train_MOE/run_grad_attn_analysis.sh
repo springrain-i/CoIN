@@ -139,6 +139,14 @@ run_task() {
   local grad_step_schedule="${COIN_GRAD_STEP_SCHEDULE:-staged}"
   local grad_layer_blocks="${COIN_GRAD_LAYER_BLOCKS:-0,4,8,12,16,20,24,28,31}"
   local grad_microbatch_sample="${COIN_GRAD_MICROBATCH_SAMPLE:-0.25}"
+  local grad_log_effective_dw="${COIN_GRAD_LOG_EFFECTIVE_DW:-auto}"
+  if [[ "${grad_log_effective_dw}" == "auto" ]]; then
+    if [[ "$k" -ge 3 ]]; then
+      grad_log_effective_dw="False"
+    else
+      grad_log_effective_dw="True"
+    fi
+  fi
   local max_steps_arg=()
   if [[ -n "${COIN_MAX_STEPS:-}" ]]; then
     max_steps_arg=(--max_steps "${COIN_MAX_STEPS}")
@@ -163,6 +171,7 @@ run_task() {
   echo "Grad step schedule: ${grad_step_schedule}"
   echo "Grad layer blocks: ${grad_layer_blocks}"
   echo "Grad microbatch sample: ${grad_microbatch_sample}"
+  echo "Grad effective dW logging: ${grad_log_effective_dw}"
   echo "Max steps: ${COIN_MAX_STEPS:-full epoch}"
   echo "Output: ${output_dir}"
   echo "Log: ${log_file}"
@@ -234,6 +243,7 @@ run_task() {
     --grad_layer_blocks "${grad_layer_blocks}"
     --grad_accum_steps "${grad_accum}"
     --grad_microbatch_sample "${grad_microbatch_sample}"
+    --grad_log_effective_dw "${grad_log_effective_dw}"
     --grad_task_name "${task_id}"
     --grad_output_dir "${task_grad_out_dir}"
     --attn_output_dir "${task_attn_out_dir}"

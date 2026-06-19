@@ -57,6 +57,12 @@ _grad_layer_blocks = _pop_arg(_argv, "--grad_layer_blocks", None)
 _grad_accum_steps = _pop_arg(_argv, "--grad_accum_steps", None)
 _grad_accum_steps = int(_grad_accum_steps) if _grad_accum_steps not in (None, "") else None
 _grad_microbatch_sample = _pop_arg(_argv, "--grad_microbatch_sample", "0.25")
+_grad_log_effective_dw_arg = _pop_arg(_argv, "--grad_log_effective_dw", None)
+_default_log_effective_dw = not _task_name.startswith(("T3_", "T4_", "T5_", "T6_", "T7_", "T8_"))
+if _grad_log_effective_dw_arg is None:
+    _grad_log_effective_dw = _default_log_effective_dw
+else:
+    _grad_log_effective_dw = str(_grad_log_effective_dw_arg).lower() == "true"
 sys.argv[1:]   = _argv
 
 
@@ -90,6 +96,7 @@ if _log_grad:
         grad_accum_steps=_grad_accum_steps,
         microbatch_sample=_grad_microbatch_sample,
         task_name=_task_name,
+        log_effective_dw=_grad_log_effective_dw,
     )
 
 if _log_attn:
