@@ -52,27 +52,37 @@ def calculate_iou(bbox1, bbox2):
 
 def eval_single(test_file, result_file):
     annotations = json.load(open(test_file))
-    annotations = {grounding_test['question_id']: grounding_test for grounding_test in annotations}
     results = [json.loads(line) for line in open(result_file)]
 
-    pred_list = []
+    if len(annotations) != len(results):
+        raise ValueError(
+            f'Annotation/result length mismatch: {len(annotations)} != {len(results)}'
+        )
+
     total = len(results)
     right = 0
-    for result in results:
-        grounding_gt = annotations[result['question_id']]
+    for index, (grounding_gt, result) in enumerate(zip(annotations, results)):
+        if str(grounding_gt['question_id']) != str(result['question_id']):
+            raise ValueError(
+                f'Question ID mismatch at index {index}: '
+                f'{grounding_gt["question_id"]} != {result["question_id"]}'
+            )
+        if 'prompt' in result and grounding_gt['text'] != result['prompt']:
+            raise ValueError(f'Question text mismatch at index {index}')
+
         bbox_string = grounding_gt['answer_bbox']
         bbox_string = bbox_string.replace('[', '').replace(']', '')
         bbox_groundtruth = [float(x) for x in bbox_string.split(',')]
         size = grounding_gt['size']
 
-        pred_bbox = result['text']
-        pred_bbox = pred_bbox[1:] if len(pred_bbox) > 0 and pred_bbox[0] == ' ' else pred_bbox
+        pred_bbox = result['text'].strip()
         try:
-            pred_bbox = pred_bbox.replace('[', '').replace(']', '')
-            bbox_pred = [float(x) for x in pred_bbox[1:-1].split(',')]
+            if pred_bbox.startswith('[') and pred_bbox.endswith(']'):
+                pred_bbox = pred_bbox[1:-1]
+            bbox_pred = [float(value.strip()) for value in pred_bbox.split(',')]
             if len(bbox_pred) != 4:
                 continue
-        except:
+        except (TypeError, ValueError):
             continue
 
         # bbox_pred = change_bbox((bbox_pred[0],bbox_pred[1],bbox_pred[2],bbox_pred[3]),size[0],size[1])

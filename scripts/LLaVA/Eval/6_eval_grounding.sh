@@ -28,7 +28,7 @@ if [ "$LORA_MODE" = "visual" ]; then
     LORA_MODE='vision'
 fi
 
-BATCH_SIZE="${COIN_EVAL_BATCH_SIZE:-1}"
+BATCH_SIZE="${COIN_EVAL_BATCH_SIZE:-4}"
 
 RESULT_DIR="./results/CoIN/LLaVA/Grounding"
 
@@ -44,6 +44,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --temperature 0 \
         --merge-lora False \
         --lora-mode $LORA_MODE \
+        --max_new_tokens 50 \
         --batch-size $BATCH_SIZE \
         --conv-mode vicuna_v1 &
 done

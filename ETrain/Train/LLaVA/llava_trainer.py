@@ -259,11 +259,50 @@ def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, 
     return [i for megabatch in megabatches for batch in megabatch for i in batch]
 
 
+def _load_mm_projector_from_state_dict(model, state_dict, checkpoint_path):
+    marker = 'mm_projector.'
+    projector_state_dict = {}
+    projector_source_keys = set()
+
+    for key, value in state_dict.items():
+        if marker not in key:
+            continue
+        projector_key = key.split(marker, 1)[1]
+        if not projector_key:
+            raise RuntimeError(f'Invalid mm_projector key {key!r} in {checkpoint_path}')
+        if projector_key in projector_state_dict:
+            raise RuntimeError(
+                f'Duplicate mm_projector key {projector_key!r} in {checkpoint_path}'
+            )
+        projector_state_dict[projector_key] = value
+        projector_source_keys.add(key)
+
+    if not projector_state_dict:
+        raise RuntimeError(f'No mm_projector weights found in {checkpoint_path}')
+
+    projector_owner = model.get_model()
+    if not hasattr(projector_owner, 'mm_projector'):
+        raise RuntimeError('Could not locate mm_projector on the LLaVA model')
+
+    load_result = projector_owner.mm_projector.load_state_dict(
+        projector_state_dict,
+        strict=True,
+    )
+    if int(os.environ.get('LOCAL_RANK', '0')) in (-1, 0):
+        print(
+            f'[ProjectorLoad] source={checkpoint_path}, matched={len(projector_state_dict)}, '
+            f'missing={len(load_result.missing_keys)}, unexpected={len(load_result.unexpected_keys)}'
+        )
+
+    return projector_source_keys
+
+
 def load_model_from_previous_task(model, model_args):
     previous_task_model_path = model_args.previous_task_model_path
     print('Loading additional LLaVA weights...')
-    if os.path.exists(os.path.join(previous_task_model_path, 'non_lora_trainables.bin')):
-        non_lora_trainables = torch.load(os.path.join(previous_task_model_path, 'non_lora_trainables.bin'), map_location='cpu')
+    non_lora_path = os.path.join(previous_task_model_path, 'non_lora_trainables.bin')
+    if os.path.exists(non_lora_path):
+        non_lora_trainables = torch.load(non_lora_path, map_location='cpu')
     else:
         # this is probably from HF Hub
         from huggingface_hub import hf_hub_download
@@ -274,10 +313,29 @@ def load_model_from_previous_task(model, model_args):
                 subfolder=subfolder)
             return torch.load(cache_file, map_location='cpu')
         non_lora_trainables = load_from_hf(previous_task_model_path, 'non_lora_trainables.bin')
-    non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
-    if any(k.startswith('model.model.') for k in non_lora_trainables):
-        non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
-    model.load_state_dict(non_lora_trainables, strict=False)
+
+    projector_source_keys = _load_mm_projector_from_state_dict(
+        model,
+        non_lora_trainables,
+        non_lora_path,
+    )
+
+    remaining_non_lora = {
+        key: value
+        for key, value in non_lora_trainables.items()
+        if key not in projector_source_keys
+    }
+    if remaining_non_lora:
+        remaining_non_lora = {
+            (key[11:] if key.startswith('base_model.') else key): value
+            for key, value in remaining_non_lora.items()
+        }
+        if any(key.startswith('model.model.') for key in remaining_non_lora):
+            remaining_non_lora = {
+                (key[6:] if key.startswith('model.') else key): value
+                for key, value in remaining_non_lora.items()
+            }
+        model.load_state_dict(remaining_non_lora, strict=False)
 
     if model_args.expert_num == None:
         from peft import PeftModel
@@ -362,20 +420,61 @@ class LLaVATrainer(Trainer):
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
             
-            optimizer_grouped_parameters = [
-                {
-                    "params": [
-                        p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)
-                    ],
-                    "weight_decay": self.args.weight_decay,
-                },
-                {
-                    "params": [
-                        p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
-                    ],
-                    "weight_decay": 0.0,
-                },
-            ]
+            if self.args.mm_projector_lr is not None:
+                projector_parameters = {
+                    name for name, _ in opt_model.named_parameters() if "mm_projector" in name
+                }
+                optimizer_grouped_parameters = [
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if n in decay_parameters and n not in projector_parameters and p.requires_grad
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                    },
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if n not in decay_parameters and n not in projector_parameters and p.requires_grad
+                        ],
+                        "weight_decay": 0.0,
+                    },
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if n in decay_parameters and n in projector_parameters and p.requires_grad
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                        "lr": self.args.mm_projector_lr,
+                    },
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if n not in decay_parameters and n in projector_parameters and p.requires_grad
+                        ],
+                        "weight_decay": 0.0,
+                        "lr": self.args.mm_projector_lr,
+                    },
+                ]
+            else:
+                optimizer_grouped_parameters = [
+                    {
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                    },
+                    {
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": 0.0,
+                    },
+                ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
@@ -1374,5 +1473,3 @@ class LLaVATrainer(Trainer):
         if args.local_rank == 0 or args.local_rank == -1:
             torch.save(fisher, os.path.join(self.args.output_dir, 'fisher.bin'))
             torch.save(optpar, os.path.join(self.args.output_dir, 'optpar.bin'))
-
-

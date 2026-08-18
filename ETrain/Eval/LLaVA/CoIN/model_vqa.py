@@ -1,6 +1,11 @@
 import argparse
 import torch
 import os
+
+if os.environ.get("COIN_USE_SDPA_PATCH", "1") == "1":
+    from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
+    replace_llama_attn_with_sdpa()
+
 import json
 from tqdm import tqdm
 import shortuuid
@@ -10,7 +15,7 @@ from ETrain.utils.LLaVA.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN,
 from ETrain.utils.LLaVA.conversation import conv_templates, SeparatorStyle
 from ETrain.Models.LLaVA.builder import load_pretrained_model
 from ETrain.utils.LLaVA.utils import disable_torch_init
-from ETrain.utils.LLaVA.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from ETrain.utils.LLaVA.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path, KeywordsStoppingCriteria
 from ETrain.Models.LLaVA import *
 from PIL import Image
 import math
@@ -93,6 +98,7 @@ def eval_model(args):
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        model.config.tokenizer_padding_side = "left"
 
     with open(os.path.expanduser(args.question_file), "r") as f:
         questions = json.load(f)
@@ -147,8 +153,8 @@ def eval_model(args):
             prompt = conv.get_prompt()
 
             input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-            image = Image.open(os.path.join(args.image_folder, image_file))
-            image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0].half().cuda()
+            image = Image.open(os.path.join(args.image_folder, image_file)).convert('RGB')
+            image_tensor = process_images([image], image_processor, model.config)[0].half().cuda()
             stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
 
             samples.append({
@@ -280,7 +286,7 @@ if __name__ == "__main__":
         default="all",
         choices=["all", "text", "vision"],
     )  # 三个选项: all, text, vision
-    parser.add_argument("--batch-size", type=int, default=1,
+    parser.add_argument("--batch-size", type=int, default=4,
                         help="Number of samples per forward pass. >1 enables batched inference.")
     args = parser.parse_args()
 
