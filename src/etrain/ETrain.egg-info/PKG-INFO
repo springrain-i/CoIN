@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: ETrain
+Version: 1.1.3
+Summary: Towards GPT-4 like large language and visual assistant.
+Project-URL: Homepage, https://llava-vl.github.io
+Project-URL: Bug Tracker, https://github.com/haotian-liu/LLaVA/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: Apache Software License
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch==2.0.1
+Requires-Dist: torchvision==0.15.2
+Provides-Extra: train
+Requires-Dist: deepspeed; extra == "train"
+Requires-Dist: ninja; extra == "train"
+Requires-Dist: wandb; extra == "train"
+Dynamic: license-file

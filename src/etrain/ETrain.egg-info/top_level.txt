@@ -1,0 +1,4 @@
+CoIN
+ETrain
+FigurePlot
+results

@@ -45,6 +45,10 @@ serve_images/
 
 # Experiment logs
 logs/
+
+# Vendored ETrain runtime artifacts; source is tracked in src/etrain, results are not.
+src/etrain/results/
+src/etrain/CoIN/peft/tuners/lora.py.bak
 # benchmark training outputs (model weights)
 bench_results/**/adapter_model.bin
 bench_results/**/non_lora_trainables.bin
