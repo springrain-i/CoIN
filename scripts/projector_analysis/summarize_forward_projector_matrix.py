@@ -129,9 +129,9 @@ def main() -> None:
         writer.writerows(diagonal_rows)
 
     summary = [
-        "# Forward early-projector diagonal sweep",
+        "# Forward standard-LoRA early-projector diagonal sweep",
         "",
-        "- Final adapter/router/config: T8 OCRVQA",
+        "- Final standard-LoRA adapter/config: T8 OCRVQA",
         f"- Early projector arms: T{args.start_early_task}–T{args.end_early_task}",
         "- T8 final projector arm: not re-evaluated",
         "- Protocol: projector Tn is evaluated only on task Tn",
@@ -163,7 +163,8 @@ def main() -> None:
 
     manifest = {
         "schema_version": 1,
-        "experiment": "forward_projector_swap_diagonal_sweep",
+        "experiment": "forward_projector_swap_standard_lora_diagonal_sweep",
+        "adaptation_method": "standard_lora",
         "run_timestamp": args.run_timestamp,
         "start_early_task": args.start_early_task,
         "end_early_task": args.end_early_task,

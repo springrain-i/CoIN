@@ -1,4 +1,8 @@
-# Early `mm_projector` 替换实验汇报
+# 历史 MoE-LoRA：Early `mm_projector` 替换实验汇报
+
+> 历史记录：本报告使用的是旧的 MoE-LoRA checkpoint，与当前
+> `coin_lora_zero2_gbs128_seed42_20260820_2110` 标准 LoRA 实验无关。本文数值不得
+> 用作当前标准 LoRA projector swap 的结果或结论；当前实验协议见 `README.md`。
 
 ## 1. 实验摘要
 

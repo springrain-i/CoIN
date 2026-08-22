@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Build one forward-order projector-swap checkpoint and evaluate only its matching task.
+# Build one standard-LoRA forward projector-swap checkpoint and evaluate its matching task.
 # Usage: bash scripts/projector_analysis/run_forward_projector_swap_8tasks.sh EARLY_TASK_ID
 
 PROJECTOR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,16 +25,6 @@ EVAL_SCRIPTS=(
   "${REPO_ROOT}/scripts/LLaVA/Eval/7_eval_vqav2.sh"
   "${REPO_ROOT}/scripts/LLaVA/Eval/8_eval_ocrvqa.sh"
 )
-RESULT_DIRS=(
-  "${REPO_ROOT}/results/CoIN/LLaVA/ScienceQA_NoMerge_Visual"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Final_ON_ImageNet_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/GQA_MOE_only_vision"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VizWiz"
-  "${REPO_ROOT}/results/CoIN/LLaVA/Grounding"
-  "${REPO_ROOT}/results/CoIN/LLaVA/VQAv2"
-  "${REPO_ROOT}/results/CoIN/LLaVA/OCRVQA"
-)
 QUESTION_FILES=(
   "${COIN_INSTR_ROOT}/ScienceQA/test.json"
   "${COIN_INSTR_ROOT}/TextVQA/val.json"
@@ -56,12 +46,15 @@ MATERIALIZE_ADAPTER="${MATERIALIZE_ADAPTER:-0}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date '+%Y%m%d_%H%M%S')}"
 EARLY_TASK_NAME="${TASK_NAMES[$((EARLY_TASK_ID - 1))]}"
 ARM_ID="early_T${EARLY_TASK_ID}_${EARLY_TASK_NAME}__final_T8_OCRVQA"
-RUN_ID="projector_swap_diagonal_${ARM_ID}_evalT${EARLY_TASK_ID}_all_bs4_${RUN_TIMESTAMP}"
-DERIVED_CHECKPOINT_ROOT="${PROJECTOR_SWAP_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_projector_swap}"
-LOG_BASE="${PROJECTOR_SWAP_LOG_ROOT:-${REPO_ROOT}/logs/LLaVA/projector_swap}"
-METRICS_BASE="${PROJECTOR_SWAP_METRICS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/metrics/projector_swap}"
+RUN_ID="lora_projector_swap_diagonal_${ARM_ID}_evalT${EARLY_TASK_ID}_all_bs4_${RUN_TIMESTAMP}"
+SOURCE_CHECKPOINT_ROOT="${PROJECTOR_SWAP_SOURCE_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_coin_lora_zero2_gbs128_seed42_20260820_2110}"
+DERIVED_CHECKPOINT_ROOT="${PROJECTOR_SWAP_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_lora_projector_swap}"
+LOG_BASE="${PROJECTOR_SWAP_LOG_ROOT:-${REPO_ROOT}/logs/LLaVA/lora_projector_swap}"
+METRICS_BASE="${PROJECTOR_SWAP_METRICS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/metrics/lora_projector_swap}"
+RESULTS_BASE="${PROJECTOR_SWAP_RESULTS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/lora_projector_swap}"
 LOG_ROOT="${LOG_BASE}/${ARM_ID}/${RUN_TIMESTAMP}"
 RUN_ROOT="${METRICS_BASE}/${ARM_ID}/${RUN_TIMESTAMP}"
+RESULT_ROOT="${RESULTS_BASE}/${ARM_ID}/${RUN_TIMESTAMP}"
 METRICS_CSV="${RUN_ROOT}/metrics.csv"
 STATUS_JSON="${RUN_ROOT}/status.json"
 RUN_MANIFEST="${RUN_ROOT}/run_manifest.json"
@@ -87,7 +80,7 @@ if [[ "$(command -v python)" != "${PYTHON_BIN}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
-mkdir -p "${LOG_ROOT}" "${RUN_ROOT}"
+mkdir -p "${LOG_ROOT}" "${RUN_ROOT}" "${RESULT_ROOT}"
 MAIN_LOG="${LOG_ROOT}/main.log"
 exec > >(tee -a "${MAIN_LOG}") 2>&1
 
@@ -146,6 +139,7 @@ check_gpu_idle() {
 prepare_args=(
   --early-task-id "${EARLY_TASK_ID}"
   --repo-root "${REPO_ROOT}"
+  --checkpoint-root "${SOURCE_CHECKPOINT_ROOT}"
   --output-root "${DERIVED_CHECKPOINT_ROOT}"
   --reuse-existing
 )
@@ -156,6 +150,7 @@ fi
 echo "[ProjectorSwap] run_id=${RUN_ID}"
 echo "[ProjectorSwap] early=T${EARLY_TASK_ID} ${EARLY_TASK_NAME}"
 echo "[ProjectorSwap] final=T8 OCRVQA"
+echo "[ProjectorSwap] adaptation_method=standard_lora"
 echo "[ProjectorSwap] mode=${LORA_MODE}"
 echo "[ProjectorSwap] COIN_EVAL_BATCH_SIZE=${COIN_EVAL_BATCH_SIZE}"
 echo "[ProjectorSwap] COIN_USE_SDPA_PATCH=${COIN_USE_SDPA_PATCH}"
@@ -163,6 +158,8 @@ echo "[ProjectorSwap] protocol=projector T${EARLY_TASK_ID} -> eval T${EARLY_TASK
 echo "[ProjectorSwap] eval_target=T${EARLY_TASK_ID} ${EARLY_TASK_NAME}"
 echo "[ProjectorSwap] python=${PYTHON_BIN}"
 echo "[ProjectorSwap] derived_checkpoint_root=${DERIVED_CHECKPOINT_ROOT}"
+echo "[ProjectorSwap] source_checkpoint_root=${SOURCE_CHECKPOINT_ROOT}"
+echo "[ProjectorSwap] result_root=${RESULT_ROOT}"
 echo "[ProjectorSwap] log_root=${LOG_ROOT}"
 echo "[ProjectorSwap] run_root=${RUN_ROOT}"
 
@@ -173,7 +170,8 @@ if [[ ! -d "${HYBRID_CHECKPOINT}" ]]; then
 fi
 
 "${PYTHON_BIN}" - "${RUN_MANIFEST}" "${RUN_ID}" "${ARM_ID}" "${EARLY_TASK_ID}" \
-  "${EARLY_TASK_NAME}" "${HYBRID_CHECKPOINT}" "${START_EVAL_TASK}" "${END_EVAL_TASK}" <<'PY'
+  "${EARLY_TASK_NAME}" "${HYBRID_CHECKPOINT}" "${START_EVAL_TASK}" "${END_EVAL_TASK}" \
+  "${SOURCE_CHECKPOINT_ROOT}" "${RESULT_ROOT}" <<'PY'
 import json
 import os
 import subprocess
@@ -182,26 +180,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 path = Path(sys.argv[1])
-run_id, arm_id, early_id, early_name, checkpoint, start, end = sys.argv[2:]
+run_id, arm_id, early_id, early_name, checkpoint, start, end, source_root, result_root = sys.argv[2:]
 repo = Path.cwd()
 git_commit = subprocess.run(
     ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
 ).stdout.strip()
 data = {
-    "schema_version": 1,
+    "schema_version": 2,
     "run_id": run_id,
     "arm_id": arm_id,
     "early_task_id": int(early_id),
     "early_task_name": early_name,
     "final_task_id": 8,
     "final_task_name": "OCRVQA",
+    "adaptation_method": "standard_lora",
+    "source_checkpoint_root": source_root,
     "hybrid_checkpoint": checkpoint,
     "swap_manifest": str(Path(checkpoint) / "swap_manifest.json"),
     "mode": "all",
     "eval_batch_size": 4,
     "use_sdpa_patch": True,
     "expected_chunks": 8,
+    "result_root": result_root,
     "start_eval_task": int(start),
     "end_eval_task": int(end),
     "python": sys.executable,
@@ -221,10 +222,9 @@ for eval_task_id in $(seq "${START_EVAL_TASK}" "${END_EVAL_TASK}"); do
   idx=$((eval_task_id - 1))
   eval_task_name="${TASK_NAMES[$idx]}"
   eval_script="${EVAL_SCRIPTS[$idx]}"
-  result_root="${RESULT_DIRS[$idx]}"
   question_file="${QUESTION_FILES[$idx]}"
-  stage="${RUN_ID}_evalT${eval_task_id}_${eval_task_name}"
-  stage_dir="${result_root}/${stage}"
+  stage="predictions"
+  stage_dir="${RESULT_ROOT}/${stage}"
   task_log="${LOG_ROOT}/eval_T${eval_task_id}_${eval_task_name}.log"
 
   require_path "${eval_script}" "eval script for T${eval_task_id}"
@@ -236,7 +236,7 @@ for eval_task_id in $(seq "${START_EVAL_TASK}" "${END_EVAL_TASK}"); do
   echo "[ProjectorSwap][Eval] log=${task_log}"
 
   if [[ "${DRY_RUN}" == "1" ]]; then
-    echo "[ProjectorSwap][DryRun] bash ${eval_script} ${stage} ${HYBRID_CHECKPOINT} all"
+    echo "[ProjectorSwap][DryRun] COIN_EVAL_RESULT_ROOT=${RESULT_ROOT} bash ${eval_script} ${stage} ${HYBRID_CHECKPOINT} all"
     update_status "${eval_task_id}" "${eval_task_name}" "dry_run" "command validated"
     continue
   fi
@@ -261,7 +261,8 @@ for eval_task_id in $(seq "${START_EVAL_TASK}" "${END_EVAL_TASK}"); do
   fi
 
   update_status "${eval_task_id}" "${eval_task_name}" "running" "eval started"
-  if ! bash "${eval_script}" "${stage}" "${HYBRID_CHECKPOINT}" "${LORA_MODE}" 2>&1 | tee "${task_log}"; then
+  mkdir -p "${stage_dir}"
+  if ! COIN_EVAL_RESULT_ROOT="${RESULT_ROOT}" bash "${eval_script}" "${stage}" "${HYBRID_CHECKPOINT}" "${LORA_MODE}" 2>&1 | tee "${task_log}"; then
     update_status "${eval_task_id}" "${eval_task_name}" "failed" "eval script returned non-zero"
     exit 1
   fi

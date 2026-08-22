@@ -1,29 +1,36 @@
-# Forward mm_projector swap
+# Standard-LoRA `mm_projector` restoration
 
-This experiment keeps the final forward-order T8 OCRVQA MoE-LoRA adapter,
-router, model config, Vicuna base model, and CLIP vision tower fixed. It replaces
-only the final checkpoint's `mm_projector` tensors with the projector saved
-immediately after a selected early continual-learning task. It evaluates each
-hybrid only on the matching task: T1 projector on T1, T2 projector on T2, and
-so on through T7 projector on T7.
+This directory prepares and evaluates **the completed forward CoIN standard-LoRA
+run** `coin_lora_zero2_gbs128_seed42_20260820_2110`. It does not reuse the
+historical MoE-LoRA checkpoints or write into their output directories.
+
+For an early task `Tn`, the experiment starts from the final T8 OCRVQA standard
+LoRA checkpoint and replaces only its four `mm_projector` tensors with those
+saved immediately after `Tn`. It then evaluates that hybrid on the matching
+task `Tn`.
 
 ## Fixed protocol
 
-- Task order: ScienceQA, TextVQA, ImageNet, GQA, VizWiz, Grounding, VQAv2, OCRVQA.
-- Final checkpoint: `backup/legacy_llava_20260818/checkpoints/LLaVA/CoIN/OCRVQA_llava_MOE_lora`.
-- Early checkpoint: T1 through T7 under `backup/legacy_llava_20260818/checkpoints/LLaVA/CoIN`.
-- LoRA mode: `all` only.
-- Eval batch size: `COIN_EVAL_BATCH_SIZE=4`.
-- SDPA batch-inference fix: `COIN_USE_SDPA_PATCH=1`.
-- Each pair uses the matching existing script under `scripts/LLaVA/Eval`
-  without changing its prompts, decoding defaults, dataset, or scorer.
+- Task order: ScienceQA, TextVQA, ImageNet, GQA, VizWiz, Grounding, VQAv2,
+  OCRVQA.
+- Source sequence:
+  `checkpoints/LLaVA/CoIN_coin_lora_zero2_gbs128_seed42_20260820_2110`.
+- Early checkpoints: `T1` through `T7`, named `{Task}_llava_lora`.
+- Final checkpoint: `OCRVQA_llava_lora` from T8.
+- Adaptation: standard PEFT LoRA, rank 128, alpha 256, targeting `q_proj`,
+  `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, and `down_proj`.
+- Fixed components: Vicuna base model, CLIP vision tower, final T8 LoRA adapter,
+  and model/adapter configuration.
+- Replaced component: `mm_projector` only, from the matching early checkpoint.
+- Evaluation: `--lora-mode all`, eight GPU workers, batch size 4 per worker,
+  and SDPA enabled.
 
-The training batch-size table in the repository instructions does not apply to
-this eval-only experiment. No training command is invoked.
+T8 is the final task and has no post-training final comparison, so it is not a
+projector-restoration arm.
 
-## Build a derived checkpoint
+## Derived checkpoints
 
-For example, use the projector from T4 GQA:
+Build T4's GQA-projector hybrid without GPU inference:
 
 ```bash
 /data4/home/sqx/.conda/envs/coin/bin/python \
@@ -31,79 +38,78 @@ For example, use the projector from T4 GQA:
   --early-task-id 4
 ```
 
-The derived checkpoint is written below:
+Derived checkpoints default to:
 
 ```text
-checkpoints/LLaVA/CoIN_projector_swap/
+checkpoints/LLaVA/CoIN_lora_projector_swap/
   early_T4_GQA__final_T8_OCRVQA/
-    OCRVQA_llava_MOE_lora/
+    OCRVQA_llava_lora/
 ```
 
-The large final adapter is an absolute read-only symlink by default. Pass
-`--materialize-adapter` to copy it instead. The projector is always written as
-an independent `non_lora_trainables.bin`. `swap_manifest.json` records source
-paths, hashes, tensor metadata, Git state, and the exact multimodal config.
+The final `adapter_model.bin` is an absolute read-only symlink by default. The
+hybrid `non_lora_trainables.bin` is verified tensor-by-tensor: all projector
+tensors equal their early source and every non-projector tensor equals the final
+source. `swap_manifest.json` records source paths, hashes, projector metadata,
+standard-LoRA configuration, model configuration, and Git state.
+
+The builder refuses a checkpoint whose adapter is not standard LoRA or whose
+rank, alpha, or target-module set differ from the formal run. To use a different
+completed standard-LoRA chain, pass `--checkpoint-root PATH` explicitly.
 
 ## Dry run
 
-Validate the complete T1-through-T7 sweep without starting GPU inference:
+The runner's dry run builds/validates its derived checkpoint and prints the one
+formal evaluation command, but does not start GPU inference:
 
 ```bash
 DRY_RUN=1 bash scripts/projector_analysis/run_all_forward_projector_swaps.sh
 ```
 
-Validate only one projector arm:
+For one arm:
 
 ```bash
 DRY_RUN=1 bash scripts/projector_analysis/run_forward_projector_swap_8tasks.sh 4
 ```
 
-Dry run builds or validates the derived checkpoint and prints its one matching
-formal eval command, but does not start GPU inference.
+## Full diagonal sweep
 
-## Full T1-T7 projector sweep
-
-The formal experiment runs seven diagonal pairs: T1 projector on T1 ScienceQA,
-T2 projector on T2 TextVQA, through T7 projector on T7 VQAv2. Each eval uses all
-eight GPUs (eight chunks), and the seven pairs run sequentially. T8 is the
-unchanged final projector, so it is not re-evaluated.
-
-Activate the `coin` environment, confirm all eight GPUs are idle, and run the
-full sweep in the `coin` tmux session:
+After confirming that the eight GPUs are idle:
 
 ```bash
 conda activate coin
+export CUDA_HOME=$CONDA_PREFIX
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+export CUDAHOSTCXX=/usr/bin/g++-11
+nvidia-smi
 bash scripts/projector_analysis/run_all_forward_projector_swaps.sh
 ```
 
-For an isolated arm, pass its early task ID to the single-arm runner:
-
-```bash
-bash scripts/projector_analysis/run_forward_projector_swap_8tasks.sh 4
-```
-
-Resume one diagonal pair with the original `RUN_TIMESTAMP`:
+The seven arms run sequentially, each occupying all eight GPUs. To resume a
+specific arm, retain its timestamp:
 
 ```bash
 RUN_TIMESTAMP=YYYYMMDD_HHMMSS \
   bash scripts/projector_analysis/run_forward_projector_swap_8tasks.sh 4
 ```
 
-Complete existing stages are validated and skipped. An existing incomplete
-stage aborts the run and is never deleted or overwritten automatically.
+Existing complete stages are validated and reused. An incomplete stage aborts;
+the runner never deletes or overwrites it automatically.
 
 ## Outputs
 
-- Derived checkpoint: `checkpoints/LLaVA/CoIN_projector_swap/`.
-- Logs: `logs/LLaVA/projector_swap/<arm>/<timestamp>/`.
-- Metrics and manifests:
-  `results/CoIN/LLaVA/metrics/projector_swap/<arm>/<timestamp>/`.
-- Final 7-row diagonal summary:
-  `results/CoIN/LLaVA/metrics/projector_swap/all_early/<timestamp>/`.
-- Predictions and task scorer outputs remain in the standard result roots used
-  by the eight existing eval scripts. Every stage includes a globally unique run
-ID, and `result_paths.json` indexes those directories.
+- Derived checkpoints: `checkpoints/LLaVA/CoIN_lora_projector_swap/`.
+- Logs: `logs/LLaVA/lora_projector_swap/`.
+- Metrics/manifests: `results/CoIN/LLaVA/metrics/lora_projector_swap/`.
+- Predictions and task scorer outputs: `results/CoIN/LLaVA/lora_projector_swap/`.
+- Sweep summary: `results/CoIN/LLaVA/metrics/lora_projector_swap/all_early/<timestamp>/`.
 
-For isolated validation, the runner also accepts `PROJECTOR_SWAP_CHECKPOINT_ROOT`,
-`PROJECTOR_SWAP_LOG_ROOT`, and `PROJECTOR_SWAP_METRICS_ROOT`. Their defaults are
-the standard checkpoint, log, and result locations listed above.
+All results produced before sample-cohort annotation are descriptive full-test
+outputs. They must not be presented as an `essential_forgetting` causal result
+until the frozen two-stage labeling/cohort procedure has been applied.
+
+## Historical MoE-LoRA artifacts
+
+`EXPERIMENT_REPORT_20260818.md` documents a prior MoE-LoRA run and is retained
+solely as historical implementation context. Its checkpoints, outputs, and
+numbers do not belong to the standard-LoRA experiment above.

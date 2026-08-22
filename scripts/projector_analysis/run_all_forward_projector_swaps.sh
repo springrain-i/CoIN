@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Run the seven diagonal projector/eval pairs sequentially. Each pair uses all 8 GPUs.
+# Run seven standard-LoRA diagonal projector/eval pairs sequentially on all 8 GPUs.
 
 PROJECTOR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${PROJECTOR_SCRIPT_DIR}/../.." && pwd)"
@@ -11,9 +11,11 @@ END_EARLY_TASK="${END_EARLY_TASK:-7}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date '+%Y%m%d_%H%M%S')}"
 DRY_RUN="${DRY_RUN:-0}"
 
-DERIVED_CHECKPOINT_ROOT="${PROJECTOR_SWAP_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_projector_swap}"
-LOG_BASE="${PROJECTOR_SWAP_LOG_ROOT:-${REPO_ROOT}/logs/LLaVA/projector_swap}"
-METRICS_BASE="${PROJECTOR_SWAP_METRICS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/metrics/projector_swap}"
+SOURCE_CHECKPOINT_ROOT="${PROJECTOR_SWAP_SOURCE_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_coin_lora_zero2_gbs128_seed42_20260820_2110}"
+DERIVED_CHECKPOINT_ROOT="${PROJECTOR_SWAP_CHECKPOINT_ROOT:-${REPO_ROOT}/checkpoints/LLaVA/CoIN_lora_projector_swap}"
+LOG_BASE="${PROJECTOR_SWAP_LOG_ROOT:-${REPO_ROOT}/logs/LLaVA/lora_projector_swap}"
+METRICS_BASE="${PROJECTOR_SWAP_METRICS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/metrics/lora_projector_swap}"
+RESULTS_BASE="${PROJECTOR_SWAP_RESULTS_ROOT:-${REPO_ROOT}/results/CoIN/LLaVA/lora_projector_swap}"
 ORCHESTRATOR_ROOT="${LOG_BASE}/all_early/${RUN_TIMESTAMP}"
 MATRIX_ROOT="${METRICS_BASE}/all_early/${RUN_TIMESTAMP}"
 SINGLE_RUNNER="${PROJECTOR_SCRIPT_DIR}/run_forward_projector_swap_8tasks.sh"
@@ -32,7 +34,7 @@ fi
 mkdir -p "${ORCHESTRATOR_ROOT}" "${MATRIX_ROOT}"
 exec > >(tee -a "${ORCHESTRATOR_ROOT}/orchestrator.log") 2>&1
 
-echo "[ProjectorSwapAll] forward early-projector diagonal sweep"
+echo "[ProjectorSwapAll] standard-LoRA forward early-projector diagonal sweep"
 echo "[ProjectorSwapAll] early_range=T${START_EARLY_TASK}..T${END_EARLY_TASK}"
 echo "[ProjectorSwapAll] final=T8 OCRVQA (not re-evaluated as a projector arm)"
 echo "[ProjectorSwapAll] protocol=projector Tn -> eval Tn"
@@ -40,6 +42,7 @@ echo "[ProjectorSwapAll] execution=sequential diagonal pairs; 8 GPUs per pair"
 echo "[ProjectorSwapAll] mode=all"
 echo "[ProjectorSwapAll] eval_batch_size=4"
 echo "[ProjectorSwapAll] timestamp=${RUN_TIMESTAMP}"
+echo "[ProjectorSwapAll] source_checkpoint_root=${SOURCE_CHECKPOINT_ROOT}"
 
 echo "[ProjectorSwapAll] Prebuilding and validating all requested hybrid checkpoints."
 for early_task_id in $(seq "${START_EARLY_TASK}" "${END_EARLY_TASK}"); do
@@ -47,6 +50,7 @@ for early_task_id in $(seq "${START_EARLY_TASK}" "${END_EARLY_TASK}"); do
     "${PYTHON_BIN}" "${PREPARE_SCRIPT}" \
       --early-task-id "${early_task_id}" \
       --repo-root "${REPO_ROOT}" \
+      --checkpoint-root "${SOURCE_CHECKPOINT_ROOT}" \
       --output-root "${DERIVED_CHECKPOINT_ROOT}" \
       --reuse-existing
   )"
@@ -57,9 +61,11 @@ for early_task_id in $(seq "${START_EARLY_TASK}" "${END_EARLY_TASK}"); do
   echo "[ProjectorSwapAll] >>> Start projector T${early_task_id} -> eval T${early_task_id}"
   RUN_TIMESTAMP="${RUN_TIMESTAMP}" \
   DRY_RUN="${DRY_RUN}" \
+  PROJECTOR_SWAP_SOURCE_CHECKPOINT_ROOT="${SOURCE_CHECKPOINT_ROOT}" \
   PROJECTOR_SWAP_CHECKPOINT_ROOT="${DERIVED_CHECKPOINT_ROOT}" \
   PROJECTOR_SWAP_LOG_ROOT="${LOG_BASE}" \
   PROJECTOR_SWAP_METRICS_ROOT="${METRICS_BASE}" \
+  PROJECTOR_SWAP_RESULTS_ROOT="${RESULTS_BASE}" \
   bash "${SINGLE_RUNNER}" "${early_task_id}"
   echo "[ProjectorSwapAll] <<< Complete projector T${early_task_id} -> eval T${early_task_id}"
 done

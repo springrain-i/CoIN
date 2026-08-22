@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an eval-only checkpoint with a selected early mm_projector."""
+"""Build a standard-LoRA eval checkpoint with a selected early mm_projector."""
 
 from __future__ import annotations
 
@@ -30,6 +30,15 @@ TASK_NAMES = {
 }
 FINAL_TASK_ID = 8
 EXPECTED_PROJECTOR_KEYS = ("0.weight", "0.bias", "2.weight", "2.bias")
+EXPECTED_LORA_TARGETS = {
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+}
 CONFIG_KEYS = (
     "hidden_size",
     "mm_hidden_size",
@@ -130,6 +139,34 @@ def validate_configs(early_config: Path, final_config: Path) -> dict[str, Any]:
     return {key: final.get(key) for key in CONFIG_KEYS}
 
 
+def validate_standard_lora_adapter(adapter_config: Path) -> dict[str, Any]:
+    """Reject a MoE/other adapter checkpoint before building a LoRA hybrid."""
+    config = load_json(adapter_config)
+    if config.get("peft_type") != "LORA":
+        raise RuntimeError(
+            f"Expected standard LoRA adapter (peft_type=LORA), got "
+            f"{config.get('peft_type')!r}: {adapter_config}"
+        )
+    targets = set(config.get("target_modules", []))
+    if targets != EXPECTED_LORA_TARGETS:
+        raise RuntimeError(
+            "Unexpected standard-LoRA target modules: "
+            f"missing={sorted(EXPECTED_LORA_TARGETS - targets)}, "
+            f"extra={sorted(targets - EXPECTED_LORA_TARGETS)}"
+        )
+    if config.get("r") != 128 or config.get("lora_alpha") != 256:
+        raise RuntimeError(
+            "Unexpected standard-LoRA rank/alpha: "
+            f"r={config.get('r')!r}, alpha={config.get('lora_alpha')!r}"
+        )
+    return {
+        "peft_type": config["peft_type"],
+        "rank": config["r"],
+        "lora_alpha": config["lora_alpha"],
+        "target_modules": sorted(targets),
+    }
+
+
 def build_hybrid_state(
     early_state: dict[str, torch.Tensor],
     final_state: dict[str, torch.Tensor],
@@ -206,7 +243,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--early-task-id", type=int, required=True, choices=range(1, 8))
     parser.add_argument("--repo-root", type=Path, default=repo_root)
-    parser.add_argument("--checkpoint-root", type=Path)
+    parser.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        help="Root of the completed standard-LoRA CoIN sequence.",
+    )
     parser.add_argument("--output-root", type=Path)
     parser.add_argument(
         "--materialize-adapter",
@@ -226,23 +267,24 @@ def main() -> None:
     repo_root = args.repo_root.resolve()
     checkpoint_root = (
         args.checkpoint_root
-        or repo_root / "backup/legacy_llava_20260818/checkpoints/LLaVA/CoIN"
+        or repo_root
+        / "checkpoints/LLaVA/CoIN_coin_lora_zero2_gbs128_seed42_20260820_2110"
     ).resolve()
     output_root = (
-        args.output_root or repo_root / "checkpoints/LLaVA/CoIN_projector_swap"
+        args.output_root or repo_root / "checkpoints/LLaVA/CoIN_lora_projector_swap"
     ).resolve()
 
     early_task_id = args.early_task_id
     early_task_name = TASK_NAMES[early_task_id]
     final_task_name = TASK_NAMES[FINAL_TASK_ID]
-    early_checkpoint = checkpoint_root / f"{early_task_name}_llava_MOE_lora"
-    final_checkpoint = checkpoint_root / f"{final_task_name}_llava_MOE_lora"
+    early_checkpoint = checkpoint_root / f"{early_task_name}_llava_lora"
+    final_checkpoint = checkpoint_root / f"{final_task_name}_llava_lora"
     arm_id = (
         f"early_T{early_task_id}_{early_task_name}__"
         f"final_T{FINAL_TASK_ID}_{final_task_name}"
     )
     arm_dir = output_root / arm_id
-    destination = arm_dir / f"{final_task_name}_llava_MOE_lora"
+    destination = arm_dir / f"{final_task_name}_llava_lora"
 
     early_non_lora = required_file(early_checkpoint, "non_lora_trainables.bin")
     final_non_lora = required_file(final_checkpoint, "non_lora_trainables.bin")
@@ -251,6 +293,7 @@ def main() -> None:
     early_config = required_file(early_checkpoint, "config.json")
     final_config = required_file(final_checkpoint, "config.json")
     multimodal_config = validate_configs(early_config, final_config)
+    lora_config = validate_standard_lora_adapter(final_adapter_config)
 
     source_hashes = {
         "early_non_lora_trainables": sha256_file(early_non_lora),
@@ -303,8 +346,9 @@ def main() -> None:
         verify_hybrid(hybrid_non_lora, early_non_lora, final_non_lora)
 
         manifest = {
-            "schema_version": 1,
-            "experiment": "forward_projector_swap",
+            "schema_version": 2,
+            "experiment": "forward_projector_swap_standard_lora",
+            "adaptation_method": "standard_lora",
             "arm_id": arm_id,
             "eval_only": True,
             "early_task_id": early_task_id,
@@ -315,6 +359,7 @@ def main() -> None:
             "final_checkpoint": str(final_checkpoint),
             "hybrid_checkpoint": str(destination),
             "adapter_storage": adapter_storage,
+            "final_adapter": lora_config,
             "projector_tensors": tensor_manifest,
             "preserved_final_non_projector_keys": sorted(
                 key for key in final_state if "mm_projector." not in key

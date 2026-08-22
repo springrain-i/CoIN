@@ -70,14 +70,14 @@ def main() -> None:
             )
 
     summary_lines = [
-        "# Forward projector-swap evaluation",
+        "# Forward standard-LoRA projector-swap evaluation",
         "",
         f"- Run: `{manifest['run_id']}`",
         (
             f"- Projector: T{manifest['early_task_id']} "
             f"{manifest['early_task_name']} (immediately after training)"
         ),
-        "- Final adapter/router/config: T8 OCRVQA",
+        "- Final standard-LoRA adapter/config: T8 OCRVQA",
         f"- Hybrid checkpoint: `{manifest['hybrid_checkpoint']}`",
         "- Mode: `all`",
         "- Eval batch size: `4`",
