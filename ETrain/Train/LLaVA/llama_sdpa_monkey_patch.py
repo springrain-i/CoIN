@@ -132,6 +132,16 @@ def forward_sdpa(
         is_causal=is_causal,
     )
 
+    # With left padding, a padding query in the prefill pass has no valid
+    # key after combining the causal and key-padding masks.  Its attention
+    # row is therefore fully masked.  Do not let a non-finite value from that
+    # unused row propagate through residual connections into real tokens.
+    if attention_mask is not None and not is_decode:
+        query_is_padding = attention_mask[:, :q_len].eq(0)
+        attn_output = attn_output.masked_fill(
+            query_is_padding[:, None, :, None], 0.0
+        )
+
     attn_output = (
         attn_output.transpose(1, 2)
         .contiguous()

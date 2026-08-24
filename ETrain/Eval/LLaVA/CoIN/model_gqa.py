@@ -1,6 +1,11 @@
 import argparse
 import torch
 import os
+
+if os.environ.get("COIN_USE_SDPA_PATCH", "1") == "1":
+    from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
+    replace_llama_attn_with_sdpa()
+
 import json
 from tqdm import tqdm
 import shortuuid
@@ -142,6 +147,7 @@ def eval_model(args):
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        model.config.tokenizer_padding_side = "left"
 
     data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor,
                                      model.config, batch_size=batch_size)
@@ -237,7 +243,7 @@ if __name__ == "__main__":
         default="all",
         choices=["all", "text", "vision"],
     )  # three options: all, text, vision
-    parser.add_argument("--batch-size", type=int, default=1,
+    parser.add_argument("--batch-size", type=int, default=4,
                         help="Samples per forward pass. >1 enables batched inference.")
     args = parser.parse_args()
 

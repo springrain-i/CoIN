@@ -1,6 +1,11 @@
 import argparse
 import torch
 import os
+
+if os.environ.get("COIN_USE_SDPA_PATCH", "1") == "1":
+    from ETrain.Train.LLaVA.llama_sdpa_monkey_patch import replace_llama_attn_with_sdpa
+    replace_llama_attn_with_sdpa()
+
 import json
 from tqdm import tqdm
 import shortuuid
@@ -96,6 +101,33 @@ def create_data_loader(questions, image_folder, tokenizer, image_processor, mode
                       shuffle=False, collate_fn=collate_fn_left_pad)
 
 
+def completed_prefix_length(answers_file, questions):
+    """Validate an existing answer file and return its completed prefix length."""
+    if not os.path.exists(answers_file):
+        return 0
+
+    completed = 0
+    with open(answers_file, "r") as handle:
+        for line_no, line in enumerate(handle, 1):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Invalid JSON in resume file {answers_file} at line {line_no}"
+                ) from exc
+            if completed >= len(questions):
+                raise RuntimeError(f"Resume file has more records than its question chunk: {answers_file}")
+            expected_id = str(questions[completed]["question_id"])
+            actual_id = str(record.get("question_id"))
+            if actual_id != expected_id:
+                raise RuntimeError(
+                    f"Resume prefix mismatch in {answers_file} at line {line_no}: "
+                    f"expected question_id={expected_id}, got {actual_id}"
+                )
+            completed += 1
+    return completed
+
+
 def eval_model(args):
     # Model
     disable_torch_init()
@@ -116,7 +148,11 @@ def eval_model(args):
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
-    ans_file = open(answers_file, "w")
+    completed = completed_prefix_length(answers_file, questions) if args.resume else 0
+    if completed:
+        print(f"[Resume] Continuing {answers_file}: {completed}/{len(questions)} records already complete")
+        questions = questions[completed:]
+    ans_file = open(answers_file, "a" if args.resume else "w")
 
     if 'plain' in model_name and 'finetune' not in model_name.lower() and 'mmtag' not in args.conv_mode:
         args.conv_mode = args.conv_mode + '_mmtag'
@@ -127,6 +163,7 @@ def eval_model(args):
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        model.config.tokenizer_padding_side = "left"
 
     data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor,
                                      model.config, batch_size=batch_size)
@@ -198,8 +235,10 @@ if __name__ == "__main__":
         default="all",
         choices=["all", "text", "vision"],
     )
-    parser.add_argument("--batch-size", type=int, default=1,
+    parser.add_argument("--batch-size", type=int, default=4,
                         help="Samples per forward pass. >1 enables batched inference.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Validate and append after an existing completed answer prefix.")
     args = parser.parse_args()
 
     eval_model(args)
